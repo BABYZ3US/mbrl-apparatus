@@ -140,10 +140,15 @@ PRESETS |= {
 # Recommended: 3 seeds for the two spectral arms; the anchor can run 1 seed
 # if GPU budget is tight (its HalfCheetah band is established).
 _SPEC = ["model.latent_dim=17", "training.total_env_steps=200000"]
+# spectral arms: smooth floored decay ONLY (closed-form refits have no inertia
+# — schedules touching ~0 produce an instant unregularized interpolator), and
+# latent capped at 1x obs_dim (wide latents overfit the closed-form fit).
+_SPEC_GUARD = ["penalty.schedule.kind=cuberoot", "penalty.schedule.floor=1e-5",
+               "+model.latent_cap_mult=1"]
 PRESETS |= {
     "colab_spectral": ("train.py", [
         ("spec-ladder", _SPEC + ["+experiment=spectral_ladder"]),
-        ("spec-single", _SPEC + ["spectral.enabled=true"]),
+        ("spec-single", _SPEC + _SPEC_GUARD + ["spectral.enabled=true"]),
         ("mlp-recipe",  _RECIPE),
     ]),
 }

@@ -123,6 +123,16 @@ validation still pending: compare spectral_ladder vs single-sigma spectral contr
 vs sched-* arms on Pendulum, >= 3 seeds — the supervised +33.7% is NOT yet an RL
 claim.
 
+**Spectral scheduling rule (user, 2026-06-07, from the first RL attempt):** never
+pair the spectral path with step anneals or zero-touching oscillations (sin2chirp
+nulls, step release). The closed-form refit has no inertia: the instant lambda ~ 0,
+the next refit IS the unregularized interpolator — observed as the reward fit going
+"too good" (overfit to replay noise). Spectral arms use smooth floored decay only
+(cuberoot, floor 1e-5; baked into spectral_ladder.yaml and the colab_spectral
+preset guards). Companion rule: latent k capped at 1x obs_dim for spectral runs
+(model.latent_cap_mult=1) — the closed-form fit over-resolves wide latents; the
+4x cap (rule v2) stands for the MLP path.
+
 ## The schedule hypothesis (user, 2026-06-06 — drives the schedule ablation)
 
 Stated form: high λ early produces a smooth, general mapping of the reward manifold

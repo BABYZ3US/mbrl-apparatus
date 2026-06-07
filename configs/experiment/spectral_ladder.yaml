@@ -6,6 +6,17 @@
 # against sched-* arms and a single-sigma spectral control on Pendulum, >= 3 seeds.
 experiment:
   name: spectral_ladder
+model:
+  latent_cap_mult: 1     # cap k at obs_dim (user, 2026-06-07): the closed-form
+                         # reward fit over-resolves wide latents -> overfit
+penalty:
+  schedule:
+    kind: cuberoot       # NEVER step / chirp with the spectral path: the
+                         # closed-form refit has no inertia, so a schedule that
+                         # touches ~0 makes the next refit an unregularized
+                         # interpolator (instant overfit). Smooth decay with a
+                         # floor only.
+    floor: 1.0e-5
 spectral:
   enabled: true
   sigma_w: [0.25, 0.5, 1.0, 2.0]   # sigma parameterized over the transform
