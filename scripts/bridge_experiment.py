@@ -399,6 +399,19 @@ def recipe_cell(n: int, seed: int) -> dict:
             for lam in RECIPE_LAMS:
                 yield f"{sh['name']}@lam={lam:g}", lam * torch.diag(w)
 
+    def snr_sweep(sr, Phi):
+        """Explicit Wiener weights from split-half band SNR — parameter-free
+        (no lam, no shape sweep; selection plays no role). Records sigma_eff
+        at the SNR=1 crossing to test the user's sigma=1 hypothesis."""
+        from mbrl.models.spectral import snr_band_weights
+        theta, info = snr_band_weights(
+            Phi, r_tr, sr.w2.sqrt(), n_bands=8,
+            generator=torch.Generator().manual_seed(seed + 5))
+        if "w_at_snr1" in info:
+            row["sigma_at_snr1"] = info["w_at_snr1"] / (d ** 0.5)
+        row["band_snrs"] = [round(s, 3) for s in info["band_snrs"]]
+        yield "snr-wiener", torch.diag(theta)
+
     def poly_gram_sweep(sr, Phi):
         Pg = penalty_matrix("lap2_positive", sr, Phi, seed)
         for sh in RECIPE_SHAPES:
@@ -416,11 +429,12 @@ def recipe_cell(n: int, seed: int) -> dict:
     row["ladder_quartic"] = best_of(srL, diag_sweep)
     row["ladder_poly"] = best_of(srL, poly_sweep)
     row["ladder_poly_gram"] = best_of(srL, poly_gram_sweep)
+    row["ladder_snr"] = best_of(srL, snr_sweep)
     return row
 
 
 RECIPE_ARMS = ("single05_quartic", "ladder_quartic", "ladder_poly",
-               "ladder_poly_gram")
+               "ladder_poly_gram", "ladder_snr")
 
 
 def recipe_report(done: dict):
@@ -437,7 +451,7 @@ def recipe_report(done: dict):
             ch = ";".join(e["choice"] for e in ok)
             print(f"{n:>6} {arm:>18} {mse:>12.4f}  {ch}")
     cells = [r for r in done.values()
-             if all(not r[a].get("degenerate") for a in RECIPE_ARMS)]
+             if all(a in r and not r[a].get("degenerate") for a in RECIPE_ARMS)]
     if cells:
         for arm in RECIPE_ARMS[1:]:
             wins = sum(1 for r in cells if r[arm]["test_mse"]
@@ -446,6 +460,11 @@ def recipe_report(done: dict):
                            / r["single05_quartic"]["test_mse"] for r in cells])
             print(f"{arm} vs single05_quartic: wins {wins}/{len(cells)}, "
                   f"mean relative benefit {rel:+.1%}")
+        crossings = [r["sigma_at_snr1"] for r in cells if "sigma_at_snr1" in r]
+        if crossings:
+            print(f"SNR=1 crossing at sigma_eff = {np.mean(crossings):.3f} "
+                  f"+- {np.std(crossings):.3f} (n={len(crossings)}; "
+                  f"user hypothesis: 1.0)")
 
 
 def recipe_run(budget: float):

@@ -71,6 +71,89 @@ def poly_weights(omega_norms: Tensor, degrees, coefs) -> Tensor:
     return out
 
 
+def snr_band_weights(Phi: Tensor, y: Tensor, omega_norms: Tensor,
+                     n_bands: int = 8, snr_clip: tuple = (1e-3, 1e3),
+                     generator: "torch.Generator | None" = None):
+    """Explicit SNR penalty: per-band Wiener ridge weights, no hand-tuned shape.
+
+    The ledger's Wiener-filter identity (Tier 1) says the optimal filter passes
+    bands with SNR > 1 and suppresses SNR < 1. In the (near-orthogonal) RFF
+    basis E[Phi'Phi] = (N/M) I, so ridge with per-feature weight theta_j
+    shrinks the OLS coefficient by (N/M) / (N/M + theta_j); choosing
+
+        theta_j = (N/M) / SNR_band(j)
+
+    gives the Wiener shrinkage SNR/(1+SNR) per band — cutoff exactly at
+    SNR = 1, derived from the data instead of dialed in by hand.
+
+    Per-band SNR via INCREMENTAL split-half cross-fitting (no clean targets
+    needed): bands processed low -> high |w|; each band's signal/noise is
+    measured on the residual after lower bands' fits are subtracted (naive
+    per-feature split-half is broken by feature correlation — low-frequency
+    signal leaks into high-band coefficients consistently across halves and
+    fakes SNR >> 1 in dead bands). Split halves separate target noise;
+    residualization separates redundant signal. Bands = |w| quantile bins
+    (align with the sigma ladder's blocks when one is in use, but binning is
+    ladder-agnostic, so it also works for scalar sigma_w).
+
+    Returns (weights (M,), info) — info has per-band |w| centers, SNRs, and
+    sigma_eff = center/sqrt(d) plus the interpolated sigma where SNR crosses 1
+    (the user's hypothesis, 2026-06-08: crossing at sigma = 1)."""
+    N, M = Phi.shape
+    perm = torch.randperm(N, generator=generator)
+    A, B = perm[: N // 2], perm[N // 2:]
+
+    w = torch.as_tensor(omega_norms, dtype=torch.float32)
+    edges = torch.quantile(w, torch.linspace(0, 1, n_bands + 1))
+    weights = torch.empty(M)
+    centers, snrs = [], []
+    # INCREMENTAL (residual) SNR, bands low -> high. The naive per-feature
+    # split-half estimate is broken by feature correlation: a high-band
+    # feature's diag-approx coefficient picks up LEAKAGE from low-frequency
+    # signal, consistent across halves, so dead bands fake SNR >> 1 (observed:
+    # min band SNR ~ 10, no crossing, under-regularized everywhere). Per-band
+    # Wiener is only meaningful for the signal a band adds BEYOND lower bands,
+    # so: estimate each band's split-half SNR on the residual after the
+    # already-processed bands' (Wiener-shrunk) fit is subtracted.
+    resid = y.clone()
+    order = torch.argsort(edges[:-1])     # low |w| first (quantiles are sorted)
+    for b in order.tolist():
+        hi_ok = (w <= edges[b + 1]) if b == n_bands - 1 else (w < edges[b + 1])
+        mask = (w >= edges[b]) & hi_ok
+        if not mask.any():
+            continue
+        Pb = Phi[:, mask]
+        Mb = int(mask.sum())
+        cA = (M / len(A)) * (Pb[A].T @ resid[A])
+        cB = (M / len(B)) * (Pb[B].T @ resid[B])
+        sig = (cA * cB).mean().clamp_min(0.0)     # incremental signal power
+        noi = ((cA - cB).pow(2) / 4.0).mean().clamp_min(1e-12)
+        snr = float((sig / noi).clamp(*snr_clip))
+        weights[mask] = (N / M) / snr
+        centers.append(float(w[mask].mean()))
+        snrs.append(snr)
+        # subtract this band's Wiener-regularized fit from the residual:
+        # small ridge solve on the band block only (Mb x Mb, trivial); the
+        # ridge weight (N/M)/SNR IS the Wiener shrinkage — no extra factor
+        cb = torch.linalg.solve(Pb.T @ Pb + (N / M) / max(snr, 1e-6)
+                                * torch.eye(Mb), Pb.T @ resid)
+        resid = resid - Pb @ cb
+    # |w| where SNR crosses 1 (log-linear interpolation between band centers).
+    # sigma_eff = w_at_snr1 / sqrt(in_dim): |w| ~ sigma*sqrt(d) for N(0, s^2 I)
+    # rows — divide by sqrt(in_dim) caller-side to test the sigma=1 hypothesis.
+    import math as _math
+    info = {"band_centers": centers, "band_snrs": snrs,
+            "edges": [float(e) for e in edges]}
+    for i in range(1, len(snrs)):
+        a, b_ = snrs[i - 1], snrs[i]
+        if (a - 1.0) * (b_ - 1.0) <= 0 and a != b_:
+            la, lb = _math.log(max(a, 1e-12)), _math.log(max(b_, 1e-12))
+            t = (0.0 - la) / (lb - la)
+            info["w_at_snr1"] = centers[i - 1] + t * (centers[i] - centers[i - 1])
+            break
+    return weights, info
+
+
 class SpectralReward:
     """R(x) = sum_j c_j sqrt(2/M) cos(w_j . x + b_j), w_j ~ N(0, sigma_w^2 I),
     b_j ~ U[0, 2pi).

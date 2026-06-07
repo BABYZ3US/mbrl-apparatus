@@ -113,3 +113,42 @@ def test_sigma_ladder_validation():
         SpectralReward(4, 64, sigma_w=[], seed=0)
     with pytest.raises(ValueError):
         SpectralReward(4, 2, sigma_w=[1.0, 2.0, 3.0], seed=0)
+
+
+def test_snr_band_weights_wiener_behavior():
+    """Known band structure: low-frequency signal + white target noise. The
+    SNR weights must (a) be finite/positive, (b) penalize the signal-free
+    high-|w| bands harder than the signal-carrying low bands, (c) yield a fit
+    on noisy targets at least as good as the unweighted near-interpolator."""
+    from mbrl.models.spectral import snr_band_weights
+
+    g = torch.Generator().manual_seed(0)
+    d = 3
+    X = torch.randn(4096, d, generator=g)
+    y_clean = torch.sin(X[:, 0]) + 0.5 * X[:, 1]          # smooth, low-frequency
+    y = y_clean + 1.0 * torch.randn(len(X), generator=g)  # SNR ~ O(1)
+
+    sr = SpectralReward(d, n_features=256, sigma_w=[0.25, 0.5, 1.0, 4.0], seed=0)
+    Phi = sr.features(X)
+    theta, info = snr_band_weights(Phi, y, sr.w2.sqrt(), n_bands=8,
+                                   generator=torch.Generator().manual_seed(1))
+    assert torch.isfinite(theta).all() and (theta > 0).all()
+    snrs = info["band_snrs"]
+    assert len(snrs) >= 4
+    # low bands carry the signal: SNR should decrease from the lowest band
+    # to the highest (compare first vs last)
+    assert snrs[0] > snrs[-1]
+    # weights inversely follow SNR: highest band penalized harder than lowest
+    w = sr.w2.sqrt()
+    lo = theta[w <= info["edges"][1]].mean()
+    hi = theta[w >= info["edges"][-2]].mean()
+    assert hi > lo
+
+    # Wiener fit beats the (nearly unregularized) tiny-quartic fit on clean targets
+    Xte = torch.randn(2048, d, generator=g)
+    yte = torch.sin(Xte[:, 0]) + 0.5 * Xte[:, 1]
+    fit_snr = SpectralReward(d, 256, [0.25, 0.5, 1.0, 4.0], seed=0).fit(X, y, weights=theta)
+    fit_raw = SpectralReward(d, 256, [0.25, 0.5, 1.0, 4.0], seed=0).fit(X, y, lam=1e-9)
+    mse_snr = torch.mean((fit_snr.predict(Xte) - yte) ** 2).item()
+    mse_raw = torch.mean((fit_raw.predict(Xte) - yte) ** 2).item()
+    assert mse_snr < mse_raw

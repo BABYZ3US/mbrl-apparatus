@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from ..models import Encoder, EMAEncoder, AffineDynamics, RewardModel, Policy, ValueFn
 from ..models.reward import symlog, symexp
-from ..models.spectral import SpectralReward, poly_weights
+from ..models.spectral import SpectralReward, poly_weights, snr_band_weights
 from ..regularization.hutchinson import hvp_penalty, laplacian_trace_penalty
 from ..regularization.schedule import LambdaSchedule
 from ..training.returns import lambda_returns
@@ -133,6 +133,16 @@ class Trainer:
             self.spec_cache_y = torch.zeros(0)
             self.spec_since_refit = 0   # model updates since last refit
             self.spec_refits = 0        # 0 => heads still predict zeros (logged)
+            # weights_mode: "poly" (schedule-driven lambda polynomial) or "snr"
+            # (explicit Wiener weights from split-half band SNR — Tier-1
+            # Wiener identity made load-bearing; cutoff at SNR=1, no hand shape,
+            # schedule NOT applied). EMA across refits stabilizes the estimate.
+            self.spec_weights_mode = str(sp.get("weights_mode", "poly"))
+            self.spec_snr_bands = int(sp.get("snr_bands", 8))
+            self.spec_snr_ema_decay = float(sp.get("snr_ema", 0.9))
+            self.spec_snr_ema = [None] * len(self.spec_heads)  # per-head theta
+            self.spec_snr_info = None   # last head-0 band diagnostics
+            self.spec_snr_gen = torch.Generator().manual_seed(int(cfg.seed) + 777)
 
     # ---------------- spectral reward (closed-form RFF ridge ensemble) ----------------
     def _spectral_band_weights(self, head, t: int) -> torch.Tensor:
@@ -144,12 +154,28 @@ class Trainer:
         return poly_weights(head.w2.sqrt(), self.spec_degrees, theta)
 
     def _spectral_refit(self):
-        """Refit ALL heads on the full rolling cache with the poly weights at
-        the current t — one (M, M) solve per head, ~0.04s wall."""
+        """Refit ALL heads on the full rolling cache — one (M, M) solve per
+        head, ~0.04s wall. weights_mode=poly: schedule-driven lambda
+        polynomial. weights_mode=snr: explicit Wiener weights from measured
+        band SNR (cutoff at SNR=1), EMA-smoothed across refits; the lambda
+        schedule is NOT applied (the Wiener weights are absolute)."""
         X = self.spec_cache_x.to(self.device)
         y = self.spec_cache_y.to(self.device)
-        for head in self.spec_heads:
-            head.fit(X, y, weights=self._spectral_band_weights(head, self.step))
+        for i, head in enumerate(self.spec_heads):
+            if self.spec_weights_mode == "snr":
+                theta, info = snr_band_weights(
+                    head.features(X), y, head.w2.sqrt(),
+                    n_bands=self.spec_snr_bands, generator=self.spec_snr_gen)
+                theta = theta.to(self.device)
+                if self.spec_snr_ema[i] is not None:
+                    d = self.spec_snr_ema_decay
+                    theta = d * self.spec_snr_ema[i] + (1 - d) * theta
+                self.spec_snr_ema[i] = theta
+                if i == 0:
+                    self.spec_snr_info = info   # logged in model_update
+                head.fit(X, y, weights=theta)
+            else:
+                head.fit(X, y, weights=self._spectral_band_weights(head, self.step))
         self.spec_refits += 1
         self.spec_since_refit = 0
 
@@ -206,6 +232,15 @@ class Trainer:
             spec_metrics = {"spectral/refits": self.spec_refits,
                             "spectral/cache_n": self.spec_cache_x.shape[0],
                             "spectral/fitted": float(self.spec_refits > 0)}
+            if self.spec_weights_mode == "snr" and self.spec_snr_info:
+                inf = self.spec_snr_info
+                if inf.get("band_snrs"):
+                    spec_metrics["spectral/snr_min"] = min(inf["band_snrs"])
+                    spec_metrics["spectral/snr_max"] = max(inf["band_snrs"])
+                if "w_at_snr1" in inf:  # sigma_eff at the SNR=1 cutoff —
+                    # the user's hypothesis: this sits at sigma = 1
+                    spec_metrics["spectral/sigma_at_snr1"] = (
+                        inf["w_at_snr1"] / float(np.sqrt(self.spec_cache_x.shape[1])))
         else:
             rew_loss = F.mse_loss(self.reward(z, a, tau), r_target)
             rew_loss_val = rew_loss.item()

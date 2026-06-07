@@ -73,6 +73,15 @@ spectral:               # closed-form RFF spectral reward (models/spectral.py)
     shifts: [0]         # per-degree time-shift (model updates) applied to the
                         # lambda schedule: theta_d(t) = coefs[d]*lam(t+shifts[d])
                         # -> phase-shifted band tuning across training
+  weights_mode: poly    # poly | snr. snr = EXPLICIT Wiener weights from
+                        # split-half band SNR (Tier-1 Wiener identity made
+                        # load-bearing: cutoff at SNR=1, theta=(N/M)/SNR_band,
+                        # no hand-tuned shape, schedule not applied).
+                        # Hypothesis (user, 2026-06-08): the SNR=1 cutoff
+                        # sits at sigma_eff = 1 — logged as
+                        # spectral/sigma_at_snr1.
+  snr_bands: 8          # |w|-quantile bands for the SNR estimate
+  snr_ema: 0.9          # EMA over refits (stabilizes the split-half estimate)
 
 smoothing:              # DreamSmooth (recipe 2.5)
   enabled: true

@@ -123,6 +123,26 @@ validation still pending: compare spectral_ladder vs single-sigma spectral contr
 vs sched-* arms on Pendulum, >= 3 seeds — the supervised +33.7% is NOT yet an RL
 claim.
 
+**Bridge run 4 (2026-06-08, explicit SNR / Wiener weights): hand-tuned polynomial
+still wins; the sigma=1 hypothesis is contradicted as stated.** Implementation:
+`snr_band_weights` (models/spectral.py) — split-half cross-fitted band SNR, Wiener
+weights theta=(N/M)/SNR, cutoff at SNR=1 (the Tier-1 Wiener identity made
+load-bearing); Trainer `spectral.weights_mode=snr` logs `spectral/sigma_at_snr1`.
+Two findings: (1) the naive per-feature split-half estimate is BROKEN by feature
+correlation — low-frequency signal leaks into high-band coefficients consistently
+across halves, faking SNR >> 1 in dead bands (first attempt: -152% vs baseline);
+the incremental-residual estimator (band SNR measured on the residual after lower
+bands are fit) fixes the failure mode but the parameter-free Wiener arm still
+trails the validation-swept polynomial: 5/10 wins, mean -23.8% vs single-sigma
+baseline (vs ladder_poly +33.7%). Zero-hyperparameter vs 20-config-sweep is not a
+matched comparison, but the claim "SNR weights beat hand tuning" is NOT supported.
+(2) The measured SNR=1 crossing sits at sigma_eff = 0.207 +- 0.007 (10 cells,
+remarkably stable) — NOT at sigma = 1. The user's hypothesis is falsified in this
+setting; note the crossing is a property of data + noise level (NOISE_SIGMA=1
+here), not a universal constant. The tight crossing DOES cohere with everything
+else: signal lives below sigma ~ 0.25, which is why sigma_w=0.5 was the best
+single bandwidth (run 2) and why high-clamp poly shapes win (run 3).
+
 **Spectral scheduling rule (user, 2026-06-07, from the first RL attempt):** never
 pair the spectral path with step anneals or zero-touching oscillations (sin2chirp
 nulls, step release). The closed-form refit has no inertia: the instant lambda ~ 0,

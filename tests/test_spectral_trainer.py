@@ -185,3 +185,19 @@ def test_sigma_ladder_trainer_smoke():
         assert np.isfinite(m["loss/total"])
     assert t.spec_refits >= 1
     assert t._spectral_penalty_value() >= 0.0
+
+
+def test_snr_weights_mode_trainer_smoke():
+    """weights_mode=snr: refits use measured Wiener weights, EMA state exists,
+    metrics expose the SNR diagnostics, everything stays finite."""
+    torch.manual_seed(0)
+    cfg = make_cfg(weights_mode="snr", snr_bands=4, snr_ema=0.5,
+                   sigma_w=[0.25, 0.5, 1.0, 2.0])
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    last = {}
+    for i in range(8):
+        last = t.model_update(fake_batch(seed=300 + i))
+        assert np.isfinite(last["loss/total"])
+    assert t.spec_refits >= 1
+    assert t.spec_snr_ema[0] is not None and torch.isfinite(t.spec_snr_ema[0]).all()
+    assert "spectral/snr_min" in last and last["spectral/snr_min"] > 0
