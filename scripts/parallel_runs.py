@@ -35,21 +35,29 @@ PRESETS = {
     # dashboard (and make_figures) renders one band per arm.
     "multitask_ablation": ("train_multitask.py", [
         ("multitask-reg",    []),
-        ("multitask-lam0",   ["penalty.schedule.lam0=0", "penalty.schedule.floor=0"]),
+        ("multitask-lam0",   ["penalty.schedule.lam0=0", "penalty.schedule.floor=0",
+                              "penalty.auto_dose.enabled=false"]),
         ("multitask-notask", ["penalty.include_task=false"]),
     ]),
     # lambda-schedule ablation (validation item 8) on Pendulum
     "schedule_ablation": ("train.py", [
-        ("sched-cuberoot", ["penalty.schedule.kind=cuberoot"]),
-        ("sched-step",     ["penalty.schedule.kind=step"]),
-        ("sched-cosine",   ["penalty.schedule.kind=cosine"]),
-        ("sched-constant", ["penalty.schedule.kind=constant"]),
-        ("sched-sin2chirp", ["penalty.schedule.kind=sin2chirp"]),
+        ("sched-cuberoot", ["penalty.schedule.kind=cuberoot", "penalty.form=frobenius"]),
+        ("sched-step",     ["penalty.schedule.kind=step", "penalty.form=frobenius"]),
+        ("sched-cosine",   ["penalty.schedule.kind=cosine", "penalty.form=frobenius"]),
+        ("sched-constant", ["penalty.schedule.kind=constant", "penalty.form=frobenius"]),
+        ("sched-sin2chirp", ["penalty.schedule.kind=sin2chirp", "penalty.form=frobenius"]),
         # two-oscillator interference: beats + phase-cancellation nulls
-        ("sched-sincos", ["penalty.schedule.kind=sincos"]),
+        ("sched-sincos", ["penalty.schedule.kind=sincos", "penalty.form=frobenius"]),
+        # resonance hypothesis: f2 = m*f1 (m = latent rank) => exactly periodic
+        # nulls that reinforce, vs golden-ratio incommensurate control
+        ("sched-sincos-comm", ["penalty.schedule.kind=sincos",
+                               "+penalty.schedule.period2_mode=multiple",
+                               "+penalty.schedule.period2_mult=4"]),
+        ("sched-sincos-gold", ["penalty.schedule.kind=sincos",
+                               "+penalty.schedule.period2_mode=golden"]),
         # floor hypothesis: lambda -> exactly 0 should degrade late training
         # if the user's MLP-collapse claim holds (vs sched-step, floor 1e-5)
-        ("sched-step-zero", ["penalty.schedule.kind=step",
+        ("sched-step-zero", ["penalty.schedule.kind=step", "penalty.form=frobenius",
                              "penalty.schedule.floor=0"]),
         # the user's narrowed-down recipe: clamped decaying TRACE penalty
         ("sched-trace-chirp", ["penalty.schedule.kind=sin2chirp",
@@ -60,6 +68,7 @@ PRESETS = {
 # Original-report doses (sec.7): lam=0.5, step-anneal released at half of training.
 # 200K env steps x (200 model updates / 1000 env steps) = 40K schedule steps.
 _RECIPE = ["penalty.schedule.kind=step", "penalty.schedule.lam0=0.5",
+           "penalty.form=frobenius", "penalty.auto_dose.enabled=false",
            "+penalty.schedule.step_at=0.5", "+penalty.schedule.step_factor=0.0",
            "+penalty.schedule.total_steps=40000",
            "training.total_env_steps=200000"]
@@ -72,6 +81,7 @@ PRESETS |= {
     # apparatus regression test (must land near +98 +- 23).
     "colab_recipe":  ("train.py", [("recipe", _RECIPE)]),
     "colab_control": ("train.py", [("control", ["penalty.schedule.lam0=0",
+                                                "penalty.auto_dose.enabled=false",
                                                 "penalty.schedule.floor=0",
                                                 "smoothing.enabled=false",
                                                 "training.total_env_steps=200000"])]),
@@ -92,6 +102,28 @@ PRESETS |= {
                               "+penalty.schedule.period_end=1000",
                               "+penalty.schedule.total_steps=40000",
                               "training.total_env_steps=200000"]),
+    ]),
+}
+
+# Wide-latent (4x obs, auto-capped) + rank-locked sincos interference, scaled
+# to 5x the local sample budget — the GPU version of the proper multitask grid.
+# latent_dim=9999 deliberately overshoots: the Trainer caps it at 4*obs_dim for
+# ANY env, so the same preset works on pendulum_target (k=12) and
+# halfcheetah_vel (k=68; pass +penalty.schedule.period2_mult=68 to keep the
+# rank lock matched). 100K model updates => schedule total_steps=100000.
+_MTW = ["model.latent_dim=9999", "penalty.schedule.kind=sincos",
+        "+penalty.schedule.period2_mode=multiple",
+        "+penalty.schedule.period2_mult=12",
+        "+penalty.schedule.total_steps=100000",
+        "penalty.auto_dose.warmup_updates=2000",
+        "training.total_env_steps=500000"]
+
+PRESETS |= {
+    "colab_multitask_wide": ("train_multitask.py", [
+        ("mtw-reg",    _MTW),
+        ("mtw-lam0",   _MTW + ["penalty.schedule.lam0=0", "penalty.schedule.floor=0",
+                               "penalty.auto_dose.enabled=false"]),
+        ("mtw-notask", _MTW + ["penalty.include_task=false"]),
     ]),
 }
 

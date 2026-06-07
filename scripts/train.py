@@ -116,8 +116,13 @@ def main(cfg: DictConfig):
         for _ in range(cfg.training.model_updates_per_iter):
             metrics = trainer.model_update(buffer.sample(cfg.optim.batch_size))
         # ---- behaviour learning on imagined rollouts (GPU) ----
-        z0 = trainer.encoder(buffer.sample(cfg.optim.batch_size)[0].to(device)).detach()
-        metrics |= trainer.behaviour_update(z0)
+        # (was a single update per iteration — a bug that starved the policy at
+        # ~100 updates per run and pinned all schedule-ablation arms at
+        # random-policy level; the config key was always meant to be consumed)
+        for _ in range(cfg.training.behaviour_updates_per_iter):
+            z0 = trainer.encoder(
+                buffer.sample(cfg.optim.batch_size)[0].to(device)).detach()
+            metrics |= trainer.behaviour_update(z0)
 
         metrics["env_steps"] = env_steps
         iteration = env_steps // cfg.training.steps_per_iter

@@ -13,12 +13,26 @@ class LambdaSchedule:
                  step_at: float = 0.5, step_factor: float = 0.1,
                  total_steps: int | None = None,
                  period0: float = 20_000.0, period_end: float = 2_000.0,
-                 period2: float = 10_000.0):
+                 period2: float = 10_000.0, period2_mode: str = "free",
+                 period2_mult: int = 4):
         self.kind, self.lam0, self.t0, self.floor = kind, lam0, t0, floor
         self.step_at, self.step_factor = step_at, step_factor
         self.total_steps = total_steps
         self.period0, self.period_end = period0, period_end
-        self.period2 = period2  # sincos: second oscillator (beat = 1/|1/p0-1/p2|)
+        # sincos second oscillator (beat = 1/|1/p0 - 1/p2|). period2_mode:
+        #   free     — use period2 as given
+        #   multiple — f2 = m * f1 (m = period2_mult, set it to the tensor
+        #              rank/latent dim): commensurate frequencies => the
+        #              interference pattern is EXACTLY periodic, null points
+        #              recur at identical phases and reinforce
+        #   golden   — f2 = phi * f1: maximally incommensurate control;
+        #              quasi-periodic, nulls never repeat (smeared)
+        if period2_mode == "multiple":
+            self.period2 = period0 / max(1, int(period2_mult))
+        elif period2_mode == "golden":
+            self.period2 = period0 / 1.6180339887498949
+        else:
+            self.period2 = period2
 
     def __call__(self, t: int) -> float:
         if self.kind == "constant":

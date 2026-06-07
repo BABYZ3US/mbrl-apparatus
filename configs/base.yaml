@@ -9,7 +9,8 @@ experiment:
   name: dev
 
 model:
-  latent_dim: 4         # compact-latent soft prior (R17) — sweep it, don't assume it; capped at obs_dim automatically
+  latent_dim: 4         # capped at 4x obs_dim (user rule v2: wider latent ->
+                        # more null nodes / longer tails; e.g. 12 on Pendulum)
   hidden: 256
   depth: 2
   ema_decay: 0.995
@@ -18,22 +19,28 @@ model:
 
 penalty:
   n_probes: 2           # validated default (R4); sweep {1,2,4,8} = experiment 3
-  form: frobenius       # frobenius | laplacian_trace (R5: same Euler-Lagrange)
+  form: laplacian_trace # DEFAULT = the user's recipe: clamped decaying trace
+                        # (frobenius | laplacian_trace; R5: same Euler-Lagrange)
   clamp_trace: true     # laplacian_trace only: max(est, 0) per sample — the
                         # 'thermodynamic consistency' clamp (original findings
                         # report sec.3: clamped +41 beat Frobenius -40; unclamped -79).
                         # 'clamped decaying trace' = this + a decaying schedule.
   penalize_dynamics: false   # R+T optional (R8/R9); NEVER add policy (R10)
   auto_dose:            # auto-set lam0 from the measured fit/penalty scale ratio
-    enabled: false      # off by default — existing presets/regression runs untouched
+    enabled: true       # DEFAULT ON: dose measured per env (presets that need
+                        # fixed doses disable it explicitly)
     target_ratio: 0.1   # lam0 = target_ratio * mean_fit_loss / mean_penalty
     warmup_updates: 500 # model updates run at lam=0; dose measured on the tail 20%
     lam0_max: 10.0      # hard cap (small-init models start near-linear -> ratio can explode)
   schedule:             # R12
-    kind: cuberoot      # cuberoot | step | cosine | constant | sin2chirp | sincos
+    kind: sin2chirp     # DEFAULT = chirped clamp/release (the trace-chirp recipe)
+                        # cuberoot | step | cosine | constant | sin2chirp | sincos
                         # sincos: lam0*env*((sin 2pi t/period0 + cos 2pi t/period2)^2)/2
                         # — two-oscillator interference; beat = 1/|1/p0 - 1/p2|
-    # period2: 10000    # sincos: second oscillator period
+    # period2: 10000    # sincos: second oscillator period (period2_mode=free)
+    # period2_mode: multiple  # f2 = period2_mult * f1 — commensurate/resonant
+    # period2_mult: 4         # set to the latent/tensor rank
+    # period2_mode: golden    # incommensurate control (quasi-periodic nulls)
                         # sin2chirp: lam0*(1-t/T)*sin^2(chirped phase) — pow-free
                         # linear envelope; slow clamp/release cycles early,
                         # faster+smaller late; needs total_steps (else t0/(t0+t))

@@ -29,8 +29,10 @@ class Trainer:
     def __init__(self, cfg, obs_dim: int, action_dim: int, device: str = "cpu",
                  task_dim: int = 0):
         self.cfg, self.device, self.task_dim = cfg, torch.device(device), task_dim
-        # latent can be at most the input dimension (user rule); keep it small
-        k = min(cfg.model.latent_dim, obs_dim)
+        # latent cap: up to 4x the input dimension (user rule v2, 2026-06-07 —
+        # supersedes the earlier <= obs_dim rule; hypothesis: wider latent =>
+        # more null nodes and longer saliency tails in the reward trunk)
+        k = min(cfg.model.latent_dim, 4 * obs_dim)
         h, d = cfg.model.hidden, cfg.model.depth
         self.encoder = Encoder(obs_dim, k, h, d).to(device)
         self.ema = EMAEncoder(self.encoder, cfg.model.ema_decay)
