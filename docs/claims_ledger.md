@@ -269,7 +269,27 @@ architecture iteration).**
   (criterion a) was UNINSTRUMENTED in attempt 1 — now logged every update as
   dyn/calib_corr, dyn/calib_ratio (~0.8 = well-calibrated Gaussian),
   dyn/pred_std. Attempt 2: matched 20K, same seeds, criteria unchanged.
-  RESULTS: pending.
+
+  **Attempt 2 RESULTS (2026-06-08, seeds 3–6, all arms at 20K): (a) NOT met,
+  (b) falsifier TRIGGERED, one effect replicated.** Returns: affine −1214±52,
+  gaussian −1240±57, mlp −1193±72 (sem, n=4); pairwise winrates 0.44
+  (gaussian vs affine) / 0.56 (mlp vs affine) — parity. (a) fails on the
+  return half; its calibration half PASSES: dyn/calib_corr 0.55–0.58 > 0.5
+  on every seed, calib_ratio 0.54–0.73 (mildly overconfident σ) — the
+  Gaussian's variances are meaningful, not noise. (b) fails ⇒ per the
+  pre-registered falsifier, R15's zero-action-curvature claim is DECORATIVE
+  at Pendulum scale; requalification on MuJoCo at matched dose required
+  before R15 is cited again as load-bearing. REPLICATED across both
+  attempts: gaussian imagination suppresses late imagined-return variance by
+  4–6 orders of magnitude (attempt 2 medians: 1.9e3 vs mlp 1.1e8 vs affine
+  3.1e9) — better variance control than the affine constraint itself, which
+  was R15's selling point — still without a return payoff. POWER CAVEAT: the
+  20K Pendulum convention historically tops out ≈ −1000 (solved > −200);
+  return criteria had ~no power — this convention ranks smoothness recipes
+  but cannot adjudicate dynamics architectures. Follow-up (new
+  pre-registration required): 60–100K or HalfCheetah GPU + a fixed-σ
+  noise-injection arm to separate rsample-averaging from logvar-damping as
+  the variance mechanism.
 
 **Spectral scheduling rule (user, 2026-06-07, from the first RL attempt):** never
 pair the spectral path with step anneals or zero-touching oscillations (sin2chirp
