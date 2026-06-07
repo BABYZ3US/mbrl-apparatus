@@ -277,3 +277,21 @@ def test_gaussian_dynamics_trainer_smoke():
     assert torch.equal(t.dynamics.mean(z, a), t.dynamics.mean(z, a))
     b = t.behaviour_update(torch.randn(16, t.encoder.latent_dim))
     assert np.isfinite(b["loss/policy"])
+
+
+def test_full_mlp_dynamics_ablation_arm():
+    """model.dynamics=mlp (run-9 R15 ablation): constructs with a loud
+    warning, trains finite; deliberately NOT affine in action."""
+    import warnings
+    torch.manual_seed(0)
+    cfg = make_cfg()
+    cfg.model.dynamics = "mlp"
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        t = Trainer(cfg, obs_dim=3, action_dim=1)
+    assert any("R15" in str(x.message) for x in w)
+    from mbrl.models import FullMLPDynamics
+    assert isinstance(t.dynamics, FullMLPDynamics)
+    for i in range(4):
+        m = t.model_update(fake_batch(seed=700 + i))
+        assert np.isfinite(m["loss/dyn"])

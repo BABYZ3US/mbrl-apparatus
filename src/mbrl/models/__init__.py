@@ -1,5 +1,5 @@
 from .encoder import Encoder, EMAEncoder
-from .dynamics import AffineDynamics, GaussianAffineDynamics
+from .dynamics import AffineDynamics, GaussianAffineDynamics, FullMLPDynamics
 from .reward import RewardModel
 from .policy import Policy, ValueFn
 from .spectral import SpectralReward

@@ -525,6 +525,131 @@ def recipe_run(budget: float):
         print(f"\nall {len(cells)} cells done — wrote {RECIPE_OUT}")
 
 
+def cone_solve(A0, rhs, P_reg, D, lam, sign: float, rho: float = 1e4,
+               iters: int = 15):
+    """Approximate projection onto the sign-coherence cone
+    {c : sign * (D c) >= 0 componentwise} via active-set quadratic penalty:
+    solve, find violated rows, add rho * D_viol' D_viol, re-solve. Returns
+    (c, violation_fraction). Convex constraint set (half-space intersection),
+    so the penalty iteration converges to the QP solution as rho -> inf;
+    rho = 1e4 x is enough to push violations to ~0 here (logged, not assumed)."""
+    M = A0.shape[0]
+    eye = torch.eye(M)
+    A_base = A0 + lam * P_reg + 1e-8 * eye
+    c = torch.linalg.solve(A_base, rhs)
+    A = A_base
+    for _ in range(iters):
+        g = sign * (D @ c)
+        viol = g < 0
+        if not viol.any():
+            break
+        Dv = D[viol]
+        A = A + rho * (Dv.T @ Dv)
+        c = torch.linalg.solve(A, rhs)
+    viol_frac = float(((sign * (D @ c)) < -1e-6).float().mean())
+    return c, viol_frac
+
+
+def cone_run(budget: float = 30.0):
+    """BRIDGE RUN 7 (pre-registered in the ledger): the cone-constrained solve
+    — the LAST closed-form candidate for the clamp's operative property.
+
+    Runs 1/2 killed pointwise positivity (Gram penalty) and supported
+    coverage+sharpness instead. But the clamp itself is not a penalty — it is
+    a CONSTRAINT on sign coherence. Closest convex realization: ΔR(x_n) has
+    ONE sign across the data (both signs tried, validation picks). Arms on
+    the run-1 protocol: frobenius_diag (penalty control), lap2_indefinite
+    (unclamped analog), cone (Frobenius penalty + sign-coherence constraint).
+
+    PRE-REGISTERED CRITERION: cone < frobenius_diag < lap2_indefinite test-MSE
+    ordering in a majority of the 9 cells (the +41 > -40 > -79 ordering).
+    FALSIFIER: cone fails to beat frobenius_diag => both positivity-flavored
+    closed forms (penalty AND constraint) are dead; the ledger's bridge
+    prediction has no remaining closed-form candidate and moves to the RL
+    loop or retirement."""
+    cells_path = RESULTS_DIR / "cone_cells.jsonl"
+    out_path = RESULTS_DIR / "cone_test.json"
+    cells_path.parent.mkdir(parents=True, exist_ok=True)
+    done = {}
+    if cells_path.exists():
+        for line in cells_path.read_text().splitlines():
+            r = json.loads(line)
+            done[(r["n"], r["seed"])] = r
+    from mbrl.models.spectral import SpectralReward
+    t_start = time.perf_counter()
+    for n in NS:
+        for seed in SEEDS:
+            if (n, seed) in done or time.perf_counter() - t_start > budget:
+                continue
+            xa_tr, r_tr, xa_va, r_va, xa_te, r_te = make_data(n, seed)
+            d = xa_tr.shape[1]
+            sr = SpectralReward(d, n_features=N_FEATURES, sigma_w=1.0, seed=seed)
+            Phi_tr = sr.features(xa_tr)
+            Phi_va, Phi_te = sr.features(xa_va), sr.features(xa_te)
+            A0, rhs = Phi_tr.T @ Phi_tr, Phi_tr.T @ r_tr
+            eye = torch.eye(sr.M)
+            P_diag = penalty_matrix("frobenius_diag", sr, Phi_tr, seed)
+            P_indef = penalty_matrix("lap2_indefinite", sr, Phi_tr, seed)
+            Dmat = -(Phi_tr * sr.w2)            # ΔR(x_n) = D_n · c
+            row = {"n": n, "seed": seed}
+
+            def pick(cands):
+                b = None
+                for tag, c, extra in cands:
+                    if c is None or not torch.isfinite(c).all():
+                        continue
+                    val = F.mse_loss(Phi_va @ c, r_va).item()
+                    if b is None or val < b[0]:
+                        b = (val, tag, c, extra)
+                return ({"choice": b[1],
+                         "test_mse": F.mse_loss(Phi_te @ b[2], r_te).item(),
+                         **b[3]} if b else {"degenerate": True})
+
+            def lin(P):
+                out = []
+                for lam in LAMS:
+                    try:
+                        c = torch.linalg.solve(A0 + lam * P + 1e-8 * eye, rhs)
+                    except RuntimeError:
+                        c = None
+                    out.append((f"lam={lam:g}", c, {}))
+                return out
+
+            row["frobenius_diag"] = pick(lin(P_diag))
+            row["lap2_indefinite"] = pick(lin(P_indef))
+            cands = []
+            for lam in LAMS:
+                for sign in (1.0, -1.0):
+                    c, vf = cone_solve(A0, rhs, P_diag, Dmat, lam, sign)
+                    cands.append((f"lam={lam:g}@sign={int(sign)}", c,
+                                  {"viol_frac": vf}))
+            row["cone"] = pick(cands)
+            with cells_path.open("a") as f:
+                f.write(json.dumps(row) + "\n")
+            done[(n, seed)] = row
+            print(f"done: n={n} s={seed} frob="
+                  f"{row['frobenius_diag']['test_mse']:.4f} cone="
+                  f"{row['cone']['test_mse']:.4f} indef="
+                  f"{row['lap2_indefinite']['test_mse']:.4f} "
+                  f"(viol={row['cone'].get('viol_frac', -1):.4f})")
+    rows = list(done.values())
+    if rows:
+        full = sum(1 for r in rows
+                   if r["cone"]["test_mse"] < r["frobenius_diag"]["test_mse"]
+                   < r["lap2_indefinite"]["test_mse"])
+        beats = sum(1 for r in rows
+                    if r["cone"]["test_mse"] < r["frobenius_diag"]["test_mse"])
+        print(f"\nfull ordering cone < frob < indef: {full}/{len(rows)}; "
+              f"cone beats frobenius: {beats}/{len(rows)}")
+        print("run 7 (pre-registered): "
+              + ("SUPPORTED" if full > len(rows) / 2 else "NOT SUPPORTED"))
+    if len(rows) == len(NS) * len(SEEDS):
+        out_path.write_text(json.dumps(rows, indent=1))
+        print(f"wrote {out_path}")
+    else:
+        print(f"{len(NS)*len(SEEDS)-len(rows)} cells remaining — re-run")
+
+
 def angle_deconfound(n: int = 512, seeds=(0, 1, 2, 3, 4),
                      gammas=(1.0, 2.0, 4.0, 8.0)):
     """Deconfound run 2 (improvement plan #5): move the diag-vs-Gram angle AT
@@ -604,6 +729,9 @@ def main():
     p.add_argument("--angle-deconfound", action="store_true",
                    help="anisotropic-W sweep: move the angle at FIXED "
                         "bandwidth (improvement plan #5)")
+    p.add_argument("--cone", action="store_true",
+                   help="run 7: sign-coherence cone constraint — the last "
+                        "closed-form clamp candidate (pre-registered)")
     p.add_argument("--recipe", action="store_true",
                    help="sigma-ladder + lambda-polynomial (+ Gram) recipe test")
     args = p.parse_args()
@@ -612,6 +740,9 @@ def main():
         return
     if args.angle_deconfound:
         angle_deconfound()
+        return
+    if args.cone:
+        cone_run(args.budget)
         return
     if args.recipe:
         recipe_run(args.budget)

@@ -17,7 +17,8 @@ import torch
 import torch.nn.functional as F
 
 from ..models import (Encoder, EMAEncoder, AffineDynamics,
-                      GaussianAffineDynamics, RewardModel, Policy, ValueFn)
+                      GaussianAffineDynamics, FullMLPDynamics, RewardModel,
+                      Policy, ValueFn)
 from ..models.reward import symlog, symexp
 from ..models.spectral import SpectralReward, poly_weights, snr_band_weights
 from ..regularization.hutchinson import hvp_penalty, laplacian_trace_penalty
@@ -45,8 +46,14 @@ class Trainer:
         # R15 zero-action-curvature property is preserved; variance is
         # state-only). forward() of the gaussian model is an rsample, so
         # imagination becomes a stochastic rollout with gradient flow.
-        self.dyn_stochastic = str(cfg.model.get("dynamics", "affine")) == "gaussian"
-        dyn_cls = GaussianAffineDynamics if self.dyn_stochastic else AffineDynamics
+        _dyn_kind = str(cfg.model.get("dynamics", "affine"))
+        self.dyn_stochastic = _dyn_kind == "gaussian"
+        dyn_cls = {"affine": AffineDynamics, "gaussian": GaussianAffineDynamics,
+                   "mlp": FullMLPDynamics}[_dyn_kind]
+        if _dyn_kind == "mlp":
+            import warnings as _w2
+            _w2.warn("[dynamics] mlp is the run-9 R15-ablation arm: action "
+                     "curvature is deliberately unconstrained. Never a default.")
         self.dynamics = dyn_cls(k, action_dim, h, d).to(device)
         self.symlog = bool(cfg.model.get("symlog_reward", False))
         self.reward = RewardModel(k, action_dim, h, d, task_dim=task_dim,

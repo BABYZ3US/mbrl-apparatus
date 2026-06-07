@@ -67,6 +67,7 @@ OUT_PATH = RESULTS_DIR / "scattering_test.json"
 NS = [512, 2048]
 SEEDS = [0, 1, 2, 3, 4]
 TARGETS = ("smooth", "resonant")
+EXTREME_TARGETS = ("goal", "sharp")   # run 8: where linear features ring
 NOISE_SIGMA = 1.0
 LADDER = [0.25, 0.5, 1.0, 2.0]
 LAMS = [1e-4, 1e-2, 1.0, 100.0]
@@ -91,6 +92,18 @@ def make_cell(n: int, seed: int, target: str):
         centers = XA_t[idx]                      # resonances ON the manifold
         d2 = torch.cdist(XA_t, centers).pow(2)   # (N, K)
         r = r + (SPIKE_A * SPIKE_EPS / (SPIKE_EPS + d2)).sum(-1)
+    elif target == "goal":                       # run 8: discontinuous bonus
+        idx = np.random.default_rng(seed + 50).choice(len(XA), N_SPIKES,
+                                                      replace=False)
+        centers = XA_t[idx]
+        d2 = torch.cdist(XA_t, centers).pow(2)
+        r = r + 5.0 * (d2 < 0.25).any(-1).float()    # indicator on a ball
+    elif target == "sharp":                      # run 8: near-pole spikes
+        idx = np.random.default_rng(seed + 50).choice(len(XA), N_SPIKES,
+                                                      replace=False)
+        centers = XA_t[idx]
+        d2 = torch.cdist(XA_t, centers).pow(2)
+        r = r + (30.0 * 0.002 / (0.002 + d2)).sum(-1)
     g = torch.Generator().manual_seed(seed + 9000)
     noise = NOISE_SIGMA * torch.randn(len(r), generator=g)
     perm = np.random.default_rng(seed).permutation(len(XA))
@@ -174,7 +187,8 @@ def load_done() -> dict:
 
 
 def report(done: dict):
-    for target in TARGETS:
+    seen = sorted({r['target'] for r in done.values()})
+    for target in seen:
         rows = [r for r in done.values() if r["target"] == target]
         if not rows:
             continue
@@ -184,7 +198,7 @@ def report(done: dict):
                    if r["rational"]["test_mse"] < r["linear"]["test_mse"])
         print(f"\n[{target}] linear {lin:.4f} vs rational {rat:.4f} — "
               f"rational wins {wins}/{len(rows)}")
-        if target == "resonant":
+        if target in ("resonant", "goal", "sharp"):
             nlin = np.mean([r["linear"].get("near_spike_mse", np.nan) for r in rows])
             nrat = np.mean([r["rational"].get("near_spike_mse", np.nan) for r in rows])
             nwins = sum(1 for r in rows if r["rational"].get("near_spike_mse", 9e9)
@@ -197,7 +211,7 @@ def report(done: dict):
             print(f"  resonance recovery contrast = {contrast:.1f} "
                   f"(criterion: > 3); D-clamp rate = {clamp:.3%}")
     # pre-registered verdict
-    res = [r for r in done.values() if r["target"] == "resonant"]
+    res = [r for r in done.values() if r["target"] in ("resonant", "goal", "sharp")]
     smo = [r for r in done.values() if r["target"] == "smooth"]
     if res and smo and len(res) + len(smo) == len(NS) * len(SEEDS) * 2:
         i_ok = (sum(1 for r in res if r["rational"]["test_mse"]
@@ -213,10 +227,18 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--budget", type=float, default=30.0)
     p.add_argument("--report", action="store_true")
+    p.add_argument("--extreme", action="store_true",
+                   help="run 8: goal/sharp targets (new pre-registration)")
     args = p.parse_args()
+    global CELLS_PATH, OUT_PATH
+    targets = TARGETS
+    if args.extreme:
+        targets = EXTREME_TARGETS
+        CELLS_PATH = RESULTS_DIR / "scattering_extreme_cells.jsonl"
+        OUT_PATH = RESULTS_DIR / "scattering_extreme_test.json"
     CELLS_PATH.parent.mkdir(parents=True, exist_ok=True)
     done = load_done()
-    cells = [(n, s, t) for t in TARGETS for n in NS for s in SEEDS]
+    cells = [(n, s, t) for t in targets for n in NS for s in SEEDS]
     if not args.report:
         t0 = time.perf_counter()
         for n, s, t in cells:

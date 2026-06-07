@@ -60,3 +60,20 @@ class GaussianAffineDynamics(AffineDynamics):
     def forward(self, z: Tensor, a: Tensor) -> Tensor:
         mu, lv = self.moments(z, a)
         return mu + torch.exp(0.5 * lv) * torch.randn_like(mu)
+
+
+class FullMLPDynamics(nn.Module):
+    """ABLATION-ONLY (bridge run 9): deterministic full-MLP transition
+    z' = z + g([z; a]) — DELIBERATELY breaks R15's d^2 T/da^2 = 0. Exists to
+    test whether the affine constraint actually binds (prediction: imagined-
+    return variance blowup / worse return at matched dose). Never make this a
+    default; if it matches affine, R15 needs requalification, not quiet
+    adoption of this class."""
+
+    def __init__(self, latent_dim: int, action_dim: int, hidden: int = 256, depth: int = 2):
+        super().__init__()
+        self.k, self.m = latent_dim, action_dim
+        self.g = mlp([latent_dim + action_dim] + [hidden] * depth + [latent_dim])
+
+    def forward(self, z: Tensor, a: Tensor) -> Tensor:
+        return z + self.g(torch.cat([z, a], dim=-1))

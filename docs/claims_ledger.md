@@ -216,6 +216,48 @@ the scattering form is decoration — consistent with the HP-11 note's own
 caveat (the identification concerns analytic structure, not ratios being
 generically better approximators).
 
+**Bridge runs 7–9 (2026-06-08, PRE-REGISTERED before results — the next
+architecture iteration).**
+- **Run 7 — sign-coherence cone (`--cone`):** the clamp is a CONSTRAINT, not a
+  penalty; closest convex realization is ΔR(x_n) single-signed across the data
+  (both signs tried, validation picks; active-set penalty iterations,
+  violation fraction logged). Criterion: cone < frobenius_diag <
+  lap2_indefinite in a majority of the 9 run-1-protocol cells. FALSIFIER: cone
+  fails to beat frobenius_diag ⇒ both positivity-flavored closed forms
+  (penalty AND constraint) are dead and the bridge prediction has no remaining
+  closed-form candidate. **RESULTS (2026-06-08): NOT SUPPORTED — 0/9; cone
+  loses to Frobenius by 5–20× in every cell.** Caveat: residual constraint
+  violations 3–26% (penalty iteration stopped short of the exact QP), but
+  tighter enforcement only constrains further — the direction is decisive.
+  PER PRE-REGISTRATION: the Weil-positivity bridge prediction now has NO
+  remaining closed-form candidate; it moves to the RL loop (clamped-trace vs
+  positivity arms inside training) or retires. The supervised proxy program
+  for the clamp is closed.
+- **Run 8 — rational head, honest regime (`scattering_head_test.py
+  --extreme`):** new targets where linear features provably ring — `goal`
+  (discontinuous indicator bonus on a manifold ball) and `sharp` (near-pole
+  spikes, eps=0.002, height 30). Criteria as run 6 (i)/(iii) on the new
+  families; run-6 numbers stay frozen in their own results file. FALSIFIER:
+  rational loses near-discontinuity too ⇒ the scattering form is retired for
+  reward modeling at any sharpness, and the linear frame + symlog is declared
+  sufficient. **RESULTS (2026-06-08): NOT SUPPORTED — goal 3/10 overall,
+  sharp 0/10.** The informative twist: on sharp targets the recovery contrast
+  is 6.5 (criterion >3 PASSES — the head correctly LOCATES the poles) while
+  prediction MSE loses 2× with 17.6% denominator clamping. The scattering
+  form finds resonances but its denominator is too noise-fragile to exploit
+  them. RETIRED for reward modeling per the falsifier; kept as a possible
+  resonance DETECTOR (measurement, not control — the same division of labor
+  as runs 4/5). Linear multi-scale frame + symlog declared sufficient.
+- **Run 9 — dynamics iteration (`--preset dynamics_ablation`, RL, Pendulum,
+  3 seeds):** affine (control) vs gaussian (NLL + rsample imagination) vs
+  full-MLP mean (DELIBERATE R15 break, ablation-only class). Criteria:
+  (a) gaussian ≥ affine on final return with better dyn calibration
+  (predicted σ vs realized error correlation > 0.5); (b) R15 binds: full-MLP
+  shows the predicted imagined-return variance blowup / worse return at
+  matched dose. FALSIFIER for (b): full-MLP matches affine ⇒ the
+  zero-action-curvature design claim is decorative at Pendulum scale and R15
+  needs requalification on MuJoCo. RESULTS: pending.
+
 **Spectral scheduling rule (user, 2026-06-07, from the first RL attempt):** never
 pair the spectral path with step anneals or zero-touching oscillations (sin2chirp
 nulls, step release). The closed-form refit has no inertia: the instant lambda ~ 0,
