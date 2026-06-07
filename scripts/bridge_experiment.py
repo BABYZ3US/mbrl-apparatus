@@ -430,11 +430,27 @@ def recipe_cell(n: int, seed: int) -> dict:
     row["ladder_poly"] = best_of(srL, poly_sweep)
     row["ladder_poly_gram"] = best_of(srL, poly_gram_sweep)
     row["ladder_snr"] = best_of(srL, snr_sweep)
+
+    # SNR-CALIBRATED ladders: measure sigma* on the (noisy) train data, place
+    # rungs at sigma* x mults, keep the validated poly penalty. Two placements
+    # to settle the multiplier choice empirically: "low" centers capacity at
+    # and below the crossing; "high" mirrors the hand ladder's position
+    # relative to the measured crossing (hand [0.25..2] sits ~1.2-9.7x above
+    # sigma* ~ 0.207 in this env).
+    from mbrl.models.spectral import calibrate_sigma_ladder
+    for tag, mults in (("cal_low", (0.5, 1.0, 2.0, 4.0)),
+                       ("cal_high", (1.0, 2.0, 4.0, 8.0))):
+        ladder, cinfo = calibrate_sigma_ladder(xa_tr, r_tr, mults=mults,
+                                               seed=seed)
+        row[f"sigma_star_{tag}"] = cinfo["sigma_star"]
+        srC = SpectralReward(d, n_features=N_FEATURES, sigma_w=ladder, seed=seed)
+        row[f"ladder_poly_{tag}"] = best_of(srC, poly_sweep)
     return row
 
 
 RECIPE_ARMS = ("single05_quartic", "ladder_quartic", "ladder_poly",
-               "ladder_poly_gram", "ladder_snr")
+               "ladder_poly_gram", "ladder_snr", "ladder_poly_cal_low",
+               "ladder_poly_cal_high")
 
 
 def recipe_report(done: dict):

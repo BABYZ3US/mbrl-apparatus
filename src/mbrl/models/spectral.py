@@ -154,6 +154,42 @@ def snr_band_weights(Phi: Tensor, y: Tensor, omega_norms: Tensor,
     return weights, info
 
 
+def calibrate_sigma_ladder(X: Tensor, y: Tensor, mults=(0.5, 1.0, 2.0, 4.0),
+                           probe_lo: float = 0.05, probe_hi: float = 8.0,
+                           probe_rungs: int = 12, n_features: int = 512,
+                           seed: int = 0):
+    """Set the sigma ladder FROM THE DATA: measure the SNR=1 crossing sigma*
+    with a wide log-spaced probe basis, then place the production rungs at
+    sigma* x mults (bridge run 4: the crossing is measurable to ~3% across
+    seeds; this uses the SNR machinery for measurement — what it is
+    demonstrably good at — while the validated lambda-polynomial stays the
+    penalty). Returns (ladder: list[float], info) with info["sigma_star"],
+    the probe band SNRs, and info["calibrated"]=False on the no-crossing
+    fallback (sigma* = geometric middle of bands with SNR > 1, or 1.0)."""
+    import math as _math
+
+    X = torch.as_tensor(X, dtype=torch.float32)
+    y = torch.as_tensor(y, dtype=torch.float32)
+    d = X.shape[1]
+    probe = [_math.exp(t) for t in torch.linspace(
+        _math.log(probe_lo), _math.log(probe_hi), probe_rungs).tolist()]
+    sr = SpectralReward(d, n_features=n_features, sigma_w=probe, seed=seed)
+    _, info = snr_band_weights(sr.features(X), y, sr.w2.sqrt(),
+                               n_bands=probe_rungs,
+                               generator=torch.Generator().manual_seed(seed + 9))
+    if "w_at_snr1" in info:
+        sigma_star = info["w_at_snr1"] / _math.sqrt(d)
+        calibrated = True
+    else:  # no crossing inside the probe range: fall back conservatively
+        live = [c for c, s in zip(info["band_centers"], info["band_snrs"]) if s > 1]
+        sigma_star = (live[len(live) // 2] / _math.sqrt(d)) if live else 1.0
+        calibrated = False
+    ladder = [float(sigma_star * m) for m in mults]
+    info = {"sigma_star": float(sigma_star), "calibrated": calibrated,
+            "probe_band_snrs": info["band_snrs"], "ladder": ladder}
+    return ladder, info
+
+
 class SpectralReward:
     """R(x) = sum_j c_j sqrt(2/M) cos(w_j . x + b_j), w_j ~ N(0, sigma_w^2 I),
     b_j ~ U[0, 2pi).

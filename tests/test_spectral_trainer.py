@@ -201,3 +201,30 @@ def test_snr_weights_mode_trainer_smoke():
     assert t.spec_refits >= 1
     assert t.spec_snr_ema[0] is not None and torch.isfinite(t.spec_snr_ema[0]).all()
     assert "spectral/snr_min" in last and last["spectral/snr_min"] > 0
+
+
+def test_sigma_auto_calibrates_and_resumes():
+    """sigma_w='auto': heads absent until the first refit, calibration sets
+    the ladder + sigma_star, the run proceeds finite, and a save -> fresh
+    Trainer -> load round-trip restores the calibrated basis exactly."""
+    torch.manual_seed(0)
+    cfg = make_cfg(sigma_w="auto", n_features=64)
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    assert t.spec_heads == [] and t.spec_sigma == "auto"
+    last = {}
+    for i in range(8):
+        last = t.model_update(fake_batch(seed=400 + i))
+        assert np.isfinite(last["loss/total"])
+    assert t.spec_refits >= 1 and len(t.spec_heads) == 2
+    assert t.spec_sigma_star is not None and t.spec_sigma_star > 0
+    assert isinstance(t.spec_sigma, list) and len(t.spec_sigma) == 4
+    assert last.get("spectral/sigma_star") == t.spec_sigma_star
+
+    sd = t.state_dict()
+    t2 = Trainer(make_cfg(sigma_w="auto", n_features=64), obs_dim=3, action_dim=1)
+    assert t2.spec_heads == []      # fresh instance, uncalibrated
+    t2.load_state_dict(sd)
+    assert len(t2.spec_heads) == 2
+    for h1, h2 in zip(t.spec_heads, t2.spec_heads):
+        assert torch.equal(h1.W, h2.W) and torch.equal(h1.c, h2.c)
+    assert t2.spec_sigma_star == t.spec_sigma_star

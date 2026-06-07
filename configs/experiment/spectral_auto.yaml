@@ -1,0 +1,23 @@
+# @package _global_
+# Bridge run 5 recipe: SNR-CALIBRATED sigma ladder + lambda polynomial.
+# Supervised head-to-head (scripts/bridge_experiment.py --recipe): calibrated
+# cal_low placement +48.3% vs single-sigma baseline (10/10), beating the
+# hand-picked ladder (+33.7%) and the Gram hybrid (+36.8%). The SNR machinery
+# does MEASUREMENT (sigma* = SNR=1 crossing, stable to ~3% across seeds);
+# the validated lambda polynomial stays the penalty.
+experiment:
+  name: spectral_auto
+model:
+  latent_cap_mult: 1     # spectral rule: k capped at obs_dim
+penalty:
+  schedule:
+    kind: cuberoot       # spectral rule: smooth floored decay only
+    floor: 1.0e-5
+spectral:
+  enabled: true
+  sigma_w: auto          # calibrate at first refit; rungs = sigma* x cal_mults
+  cal_mults: [0.5, 1.0, 2.0, 4.0]
+  poly:
+    degrees: [1, 3]      # high-clamp shape (run-3 winner)
+    coefs: [0.1, 10.0]
+    shifts: [0, 0]

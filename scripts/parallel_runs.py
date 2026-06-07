@@ -150,6 +150,10 @@ PRESETS |= {
         ("spec-ladder", _SPEC + ["+experiment=spectral_ladder"]),
         ("spec-single", _SPEC + _SPEC_GUARD + ["spectral.enabled=true"]),
         ("mlp-recipe",  _RECIPE),
+        # bridge run 5: SNR-calibrated ladder (sigma* measured per env at the
+        # first refit) — the supervised champion (+48.3%); spec-ladder is its
+        # fixed-ladder control
+        ("spec-auto",   _SPEC + ["+experiment=spectral_auto"]),
     ]),
 }
 

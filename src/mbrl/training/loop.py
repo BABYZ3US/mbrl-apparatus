@@ -119,16 +119,28 @@ class Trainer:
             if not (len(self.spec_degrees) == len(self.spec_coefs) == len(self.spec_shifts)):
                 raise ValueError("spectral.poly degrees/coefs/shifts must have equal length")
             spec_in = k + action_dim + task_dim
+            self.spec_nf = int(sp.get("n_features", 512))
+            self.spec_nheads = int(sp.get("heads", 3))
             sw = sp.get("sigma_w", 1.0)
-            try:                       # scalar, or a list = sigma LADDER
-                sw = float(sw)         # (multi-scale frame; bridge run 3)
-            except (TypeError, ValueError):
-                sw = [float(s) for s in sw]
-            self.spec_heads = [
-                SpectralReward(spec_in, n_features=int(sp.get("n_features", 512)),
-                               sigma_w=sw,
-                               seed=int(cfg.seed) * 1000 + i, device=device)
-                for i in range(int(sp.get("heads", 3)))]
+            if isinstance(sw, str) and sw == "auto":
+                # SNR-CALIBRATED ladder (bridge run 5): heads are built lazily
+                # at the first refit — calibrate_sigma_ladder measures the
+                # SNR=1 crossing sigma* on the cache and places rungs at
+                # sigma* x cal_mults. cal_low placement won the supervised
+                # head-to-head (+48.3% vs +33.7% for the hand ladder).
+                self.spec_sigma = "auto"
+                self.spec_cal_mults = tuple(
+                    float(m) for m in sp.get("cal_mults", [0.5, 1.0, 2.0, 4.0]))
+                self.spec_sigma_star = None   # logged after calibration
+                self.spec_heads = []
+            else:
+                try:                       # scalar, or a list = sigma LADDER
+                    sw = float(sw)         # (multi-scale frame; bridge run 3)
+                except (TypeError, ValueError):
+                    sw = [float(s) for s in sw]
+                self.spec_sigma = sw
+                self.spec_sigma_star = None
+                self.spec_heads = self._build_spec_heads(sw)
             self.spec_cache_x = torch.zeros(0, spec_in)   # rolling FIFO (CPU)
             self.spec_cache_y = torch.zeros(0)
             self.spec_since_refit = 0   # model updates since last refit
@@ -140,11 +152,21 @@ class Trainer:
             self.spec_weights_mode = str(sp.get("weights_mode", "poly"))
             self.spec_snr_bands = int(sp.get("snr_bands", 8))
             self.spec_snr_ema_decay = float(sp.get("snr_ema", 0.9))
-            self.spec_snr_ema = [None] * len(self.spec_heads)  # per-head theta
+            self.spec_snr_ema = [None] * self.spec_nheads  # per-head theta
             self.spec_snr_info = None   # last head-0 band diagnostics
             self.spec_snr_gen = torch.Generator().manual_seed(int(cfg.seed) + 777)
 
     # ---------------- spectral reward (closed-form RFF ridge ensemble) ----------------
+    def _build_spec_heads(self, sigma_w):
+        spec_in = self.spec_cache_x.shape[1] if hasattr(self, "spec_cache_x") \
+            and self.spec_cache_x.ndim == 2 else None
+        # at __init__ time the cache doesn't exist yet; derive from encoder
+        if spec_in is None:
+            spec_in = self.encoder.latent_dim + self.dynamics.m + self.task_dim
+        return [SpectralReward(spec_in, n_features=self.spec_nf, sigma_w=sigma_w,
+                               seed=int(self.cfg.seed) * 1000 + i,
+                               device=str(self.device))
+                for i in range(self.spec_nheads)]
     def _spectral_band_weights(self, head, t: int) -> torch.Tensor:
         """Per-feature ridge weights at model-update time t:
         sum_d coefs[d] * lam(t + shifts[d]) * |w_j|^(2*degrees[d]).
@@ -161,6 +183,15 @@ class Trainer:
         schedule is NOT applied (the Wiener weights are absolute)."""
         X = self.spec_cache_x.to(self.device)
         y = self.spec_cache_y.to(self.device)
+        if self.spec_sigma == "auto" and not self.spec_heads:
+            # first refit: calibrate the ladder from the cache (bridge run 5)
+            from ..models.spectral import calibrate_sigma_ladder
+            ladder, cinfo = calibrate_sigma_ladder(
+                X.cpu(), y.cpu(), mults=self.spec_cal_mults,
+                n_features=self.spec_nf, seed=int(self.cfg.seed))
+            self.spec_sigma_star = cinfo["sigma_star"]
+            self.spec_sigma = ladder      # frozen for the run (checkpointed)
+            self.spec_heads = self._build_spec_heads(ladder)
         for i, head in enumerate(self.spec_heads):
             if self.spec_weights_mode == "snr":
                 theta, info = snr_band_weights(
@@ -183,6 +214,8 @@ class Trainer:
         """EXACT mean-over-heads E_x ||grad^2 R||_F^2 — replaces the Hutchinson
         estimate in penalty/value so auto-dose, the adaptive horizon, and the
         dashboards keep working unchanged."""
+        if not self.spec_heads:   # sigma_w=auto before the first refit
+            return 0.0
         return sum(h.hessian_frobenius_sq() for h in self.spec_heads) / len(self.spec_heads)
 
     # ---------------- model learning ----------------
@@ -221,17 +254,23 @@ class Trainer:
             # First refit as soon as the cache holds >= n_features rows (keeps
             # the (M, M) solve well-posed); then every refit_every updates.
             # Before the first refit the heads predict zeros — logged below.
-            if (self.spec_cache_x.shape[0] >= self.spec_heads[0].M
+            if (self.spec_cache_x.shape[0] >= self.spec_nf
                     and (self.spec_refits == 0
                          or self.spec_since_refit >= self.spec_refit_every)):
                 self._spectral_refit()
             with torch.no_grad():  # diagnostic only: ensemble-mean fit MSE
-                pred = torch.stack([h.predict(x_spec) for h in self.spec_heads]).mean(0)
-                rew_loss_val = F.mse_loss(pred, r_target).item()
+                if self.spec_heads:
+                    pred = torch.stack([h.predict(x_spec)
+                                        for h in self.spec_heads]).mean(0)
+                    rew_loss_val = F.mse_loss(pred, r_target).item()
+                else:   # sigma_w=auto, pre-calibration: heads not built yet
+                    rew_loss_val = float(r_target.pow(2).mean().item())
             rew_loss = None
             spec_metrics = {"spectral/refits": self.spec_refits,
                             "spectral/cache_n": self.spec_cache_x.shape[0],
                             "spectral/fitted": float(self.spec_refits > 0)}
+            if self.spec_sigma_star is not None:
+                spec_metrics["spectral/sigma_star"] = self.spec_sigma_star
             if self.spec_weights_mode == "snr" and self.spec_snr_info:
                 inf = self.spec_snr_info
                 if inf.get("band_snrs"):
@@ -345,6 +384,9 @@ class Trainer:
         if self.spec_enabled:
             parts = [z, a] if tau is None else [z, a, tau]
             x = torch.cat(parts, dim=-1)
+            if not self.spec_heads:   # sigma_w=auto, pre-calibration
+                return (torch.zeros(z.shape[0], device=z.device),
+                        z.new_zeros(()))
             heads = torch.stack([h.predict(x) for h in self.spec_heads])  # (heads, B)
         else:
             heads = self.reward.all_heads(z, a, tau)      # (n_heads, B)
@@ -483,6 +525,8 @@ class Trainer:
                           for h in self.spec_heads],
                 "cache_x": self.spec_cache_x, "cache_y": self.spec_cache_y,
                 "since_refit": self.spec_since_refit, "refits": self.spec_refits}
+            sd["spec_sigma"] = self.spec_sigma          # auto: calibrated ladder
+            sd["spec_sigma_star"] = self.spec_sigma_star
         return sd
 
     def load_state_dict(self, sd):
@@ -509,6 +553,14 @@ class Trainer:
             self.gen.set_state(sd["hutchinson_gen"])
         if self.spec_enabled and "spectral" in sd:
             sp = sd["spectral"]
+            if len(self.spec_heads) != len(sp["heads"]):
+                # sigma_w=auto resuming before this instance calibrated:
+                # rebuild placeholder heads; W/b/c (the calibrated basis)
+                # are restored from the checkpoint below
+                self.spec_heads = self._build_spec_heads(1.0)
+                self.spec_sigma = sd.get("spec_sigma", self.spec_sigma)
+                self.spec_sigma_star = sd.get("spec_sigma_star",
+                                              self.spec_sigma_star)
             for head, hs in zip(self.spec_heads, sp["heads"]):
                 head.W = hs["W"].to(head.device)
                 head.b = hs["b"].to(head.device)

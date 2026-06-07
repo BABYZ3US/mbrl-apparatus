@@ -63,7 +63,15 @@ spectral:               # closed-form RFF spectral reward (models/spectral.py)
                         # band-differentiating poly (high-clamp: degrees [1,3],
                         # coefs [0.1, 10.0]) — the ladder x polynomial
                         # INTERACTION carries the benefit (+33.7% supervised;
-                        # claims_ledger bridge run 3; experiment/spectral_ladder)
+                        # claims_ledger bridge run 3; experiment/spectral_ladder).
+                        # OR "auto" = SNR-CALIBRATED ladder (bridge run 5,
+                        # +48.3% supervised): at the first refit, measure the
+                        # SNR=1 crossing sigma* on the cache and place rungs at
+                        # sigma* x cal_mults; logged as spectral/sigma_star,
+                        # frozen for the run, checkpointed.
+  cal_mults: [0.5, 1.0, 2.0, 4.0]  # sigma_w=auto rung placement (cal_low won
+                        # the supervised head-to-head: +48.3% vs +38.8% for
+                        # the higher placement)
   refit_every: 200      # model updates between closed-form refits
   cache_size: 4096      # rolling (x, symlog-target) cache feeding the refit
   heads: 3              # independent frequency draws = cheap exact ensemble

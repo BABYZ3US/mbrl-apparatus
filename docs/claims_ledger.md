@@ -143,6 +143,19 @@ here), not a universal constant. The tight crossing DOES cohere with everything
 else: signal lives below sigma ~ 0.25, which is why sigma_w=0.5 was the best
 single bandwidth (run 2) and why high-clamp poly shapes win (run 3).
 
+**Bridge run 5 (2026-06-08, SNR-calibrated ladder): new supervised champion.**
+Recipe: measure sigma* (the SNR=1 crossing) on the training cache with a wide
+probe basis, place ladder rungs at sigma* x mults, keep the validated lambda
+polynomial as the penalty — SNR machinery for measurement, polynomial for
+control. Head-to-head (10 cells): calibrated cal_low (mults 0.5/1/2/4) **+48.3%
+vs single-sigma baseline, 10/10** — beats the hand ladder (+33.7%), the Gram
+hybrid (+36.8%), and the higher placement (+38.8%). Trainer support:
+`spectral.sigma_w: auto` (lazy calibration at first refit, sigma* logged as
+spectral/sigma_star, ladder frozen + checkpointed, resume rebuilds the
+calibrated basis exactly — covered by tests). Preset arm: spec-auto in
+colab_spectral (`+experiment=spectral_auto`); spec-ladder is its fixed-ladder
+control. RL validation pending, same criterion as run 3's.
+
 **Spectral scheduling rule (user, 2026-06-07, from the first RL attempt):** never
 pair the spectral path with step anneals or zero-touching oscillations (sin2chirp
 nulls, step release). The closed-form refit has no inertia: the instant lambda ~ 0,
