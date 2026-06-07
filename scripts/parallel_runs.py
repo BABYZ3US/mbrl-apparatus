@@ -1,0 +1,145 @@
+"""Launch a grid of training runs in parallel, one process per core.
+
+All runs log to the SAME W&B project (mbrl-curvature) as separate runs; the
+dashboard aggregates them by `group` (= experiment.name), so seeds within an
+arm form one mean±CI band and different arms sit side by side in the same
+panels. Local JSONL mirrors land in results/runs/ as usual, so
+`make_figures.py` aggregates the same way offline.
+
+Usage:
+  # the multitask science grid: 3 arms x seeds, 6 processes
+  python scripts/parallel_runs.py --preset multitask_ablation --seeds 0 1 --jobs 6
+
+  # generic: any script + overrides, fanned over seeds
+  python scripts/parallel_runs.py --script train.py --seeds 0 1 2 3 4 \\
+      --overrides env=pendulum experiment.name=baseline --jobs 5
+
+  # see the commands without running
+  python scripts/parallel_runs.py --preset multitask_ablation --seeds 0 1 --dry-run
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+LOGDIR = ROOT / "results" / "logs" / "parallel"
+
+# preset -> (script, [(arm_name, [overrides]), ...])
+PRESETS = {
+    # The multi-task science grid: regularized vs lam0=0 vs within-task-only
+    # penalty. Distinct experiment.name per arm => distinct W&B group => the
+    # dashboard (and make_figures) renders one band per arm.
+    "multitask_ablation": ("train_multitask.py", [
+        ("multitask-reg",    []),
+        ("multitask-lam0",   ["penalty.schedule.lam0=0"]),
+        ("multitask-notask", ["penalty.include_task=false"]),
+    ]),
+    # lambda-schedule ablation (validation item 8) on Pendulum
+    "schedule_ablation": ("train.py", [
+        ("sched-cuberoot", ["penalty.schedule.kind=cuberoot"]),
+        ("sched-step",     ["penalty.schedule.kind=step"]),
+        ("sched-cosine",   ["penalty.schedule.kind=cosine"]),
+        ("sched-constant", ["penalty.schedule.kind=constant"]),
+        ("sched-sin2chirp", ["penalty.schedule.kind=sin2chirp"]),
+        # the user's narrowed-down recipe: clamped decaying TRACE penalty
+        ("sched-trace-chirp", ["penalty.schedule.kind=sin2chirp",
+                               "penalty.form=laplacian_trace"]),
+    ]),
+}
+
+# Original-report doses (sec.7): lam=0.5, step-anneal released at half of training.
+# 200K env steps x (200 model updates / 1000 env steps) = 40K schedule steps.
+_RECIPE = ["penalty.schedule.kind=step", "penalty.schedule.lam0=0.5",
+           "+penalty.schedule.step_at=0.5", "+penalty.schedule.step_factor=0.0",
+           "+penalty.schedule.total_steps=40000",
+           "training.total_env_steps=200000"]
+
+PRESETS |= {
+    # GPU-lean Colab arms: fixed doses from docs/original_findings_report.md,
+    # NO parameter sweeps. Pass env via --overrides env=walker2d etc.
+    # Recommended: recipe 3 seeds; control 1 seed (new envs only — the
+    # HalfCheetah control is known: -165 +- 41); HalfCheetah recipe run is the
+    # apparatus regression test (must land near +98 +- 23).
+    "colab_recipe":  ("train.py", [("recipe", _RECIPE)]),
+    "colab_control": ("train.py", [("control", ["penalty.schedule.lam0=0",
+                                                "smoothing.enabled=false",
+                                                "training.total_env_steps=200000"])]),
+    # head-to-head for the report's sec.3 claim, same dose, only the estimator
+    # differs (clamped trace vs Frobenius) — 2 arms, no sweep
+    "colab_estimator": ("train.py", [
+        ("est-frobenius", _RECIPE),
+        ("est-trace",     _RECIPE + ["penalty.form=laplacian_trace"]),
+    ]),
+}
+
+
+def build_commands(args) -> list[tuple[str, list[str]]]:
+    jobs = []
+    if args.preset:
+        script, arms = PRESETS[args.preset]
+        for arm, ovr in arms:
+            for s in args.seeds:
+                name = f"{arm}-s{s}"
+                jobs.append((name, [sys.executable, str(ROOT / "scripts" / script),
+                                    *ovr, *args.overrides,
+                                    f"experiment.name={arm}", f"seed={s}",
+                                    f"hydra.run.dir=outputs/parallel/{name}"]))
+    else:
+        for s in args.seeds:
+            name = f"run-s{s}"
+            jobs.append((name, [sys.executable, str(ROOT / "scripts" / args.script),
+                                *args.overrides, f"seed={s}",
+                                f"hydra.run.dir=outputs/parallel/{name}"]))
+    return jobs
+
+
+def run_one(name: str, cmd: list[str]) -> tuple[str, int]:
+    """One training process. Single-threaded math libs: parallelism comes from
+    process count, not intra-op threads (avoids 8 runs x 8 threads thrash)."""
+    env = os.environ | {"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+                        "VECLIB_MAXIMUM_THREADS": "1"}
+    log = LOGDIR / f"{name}.log"
+    with open(log, "w") as fh:
+        rc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
+                            cwd=ROOT, env=env).returncode
+    return name, rc
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--preset", choices=PRESETS, default=None)
+    p.add_argument("--script", default="train_multitask.py",
+                   help="used when no --preset is given")
+    p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    p.add_argument("--overrides", nargs="*", default=[],
+                   help="extra hydra overrides applied to every run")
+    p.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) - 1),
+                   help="concurrent processes (default: cores - 1)")
+    p.add_argument("--dry-run", action="store_true")
+    args = p.parse_args()
+
+    cmds = build_commands(args)
+    print(f"{len(cmds)} runs, {args.jobs} at a time; logs -> {LOGDIR}/")
+    for name, cmd in cmds:
+        print(f"  {name}: {' '.join(cmd[1:])}")
+    if args.dry_run:
+        return
+    LOGDIR.mkdir(parents=True, exist_ok=True)
+
+    from joblib import Parallel, delayed
+    results = Parallel(n_jobs=args.jobs)(
+        delayed(run_one)(name, cmd) for name, cmd in cmds)
+
+    failed = [(n, rc) for n, rc in results if rc != 0]
+    for n, rc in results:
+        print(f"  {'OK  ' if rc == 0 else 'FAIL'} {n}" + ("" if rc == 0 else
+              f"  (exit {rc}; see {LOGDIR}/{n}.log)"))
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

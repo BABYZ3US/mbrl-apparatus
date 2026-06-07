@@ -1,0 +1,5 @@
+# Validation item 2 — offline RL on Minari replay datasets (D4RL successor).
+defaults:
+  - /base
+experiment:
+  name: offline

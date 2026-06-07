@@ -1,0 +1,4 @@
+name: Ant-v5
+obs_dim: 105
+action_dim: 8
+action_scale: 1.0

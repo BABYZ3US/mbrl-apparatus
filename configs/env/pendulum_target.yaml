@@ -1,0 +1,5 @@
+family: pendulum_target
+name: pendulum_target
+obs_dim: 3
+action_dim: 1
+action_scale: 2.0

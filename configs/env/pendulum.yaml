@@ -1,0 +1,4 @@
+name: Pendulum-v1
+obs_dim: 3
+action_dim: 1
+action_scale: 2.0

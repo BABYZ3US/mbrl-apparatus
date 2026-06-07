@@ -1,0 +1,4 @@
+name: HalfCheetah-v5
+obs_dim: 17
+action_dim: 6
+action_scale: 1.0

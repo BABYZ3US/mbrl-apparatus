@@ -1,0 +1,6 @@
+# Validation item 6 — synthetic generic-vs-critical smoothness sweep. LOCAL CPU.
+defaults:
+  - /base
+experiment:
+  name: smoothness
+device: cpu

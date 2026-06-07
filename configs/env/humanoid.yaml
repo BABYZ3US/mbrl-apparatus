@@ -1,0 +1,4 @@
+name: Humanoid-v5
+obs_dim: 348
+action_dim: 17
+action_scale: 0.4

@@ -1,0 +1,6 @@
+# Validation item 8 — cuberoot vs step vs cosine vs constant (R12).
+defaults:
+  - /base
+experiment:
+  name: schedule
+# sweep: penalty.schedule.kind in {cuberoot, step, cosine, constant}

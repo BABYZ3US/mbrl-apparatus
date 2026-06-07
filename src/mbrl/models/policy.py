@@ -1,0 +1,53 @@
+"""Policy and value heads trained on imagined latent rollouts (Dreamer-style).
+
+The policy is NEVER curvature-penalized (R10): it needs curvature freedom.
+Optional task conditioning (task_dim > 0): inputs become [z, tau].
+"""
+from __future__ import annotations
+
+import math
+
+import torch
+from torch import nn, Tensor
+
+from .encoder import mlp
+
+_LOG2 = math.log(2.0)
+
+
+class Policy(nn.Module):
+    def __init__(self, latent_dim: int, action_dim: int, hidden: int = 256,
+                 depth: int = 2, action_scale: float = 1.0, task_dim: int = 0):
+        super().__init__()
+        self.net = mlp([latent_dim + task_dim] + [hidden] * depth + [2 * action_dim])
+        self.action_dim, self.action_scale, self.task_dim = action_dim, action_scale, task_dim
+
+    def forward(self, z: Tensor, tau: Tensor | None = None) -> tuple[Tensor, Tensor]:
+        x = torch.cat([z, tau], dim=-1) if self.task_dim else z
+        mu, log_std = self.net(x).chunk(2, dim=-1)
+        return mu, log_std.clamp(-5, 2)
+
+    def sample(self, z: Tensor, tau: Tensor | None = None) -> tuple[Tensor, Tensor]:
+        """Reparameterized tanh-Gaussian sample with exact log-prob.
+        log|d tanh(u)/du| summed via the numerically stable
+        log(1 - tanh(u)^2) = 2*(log2 - u - softplus(-2u))."""
+        mu, log_std = self(z, tau)
+        eps = torch.randn_like(mu)
+        pre = mu + eps * log_std.exp()
+        a = torch.tanh(pre) * self.action_scale
+        logp_gauss = (-0.5 * eps.pow(2) - log_std - 0.5 * math.log(2 * math.pi)).sum(-1)
+        log_det = (2.0 * (_LOG2 - pre - torch.nn.functional.softplus(-2.0 * pre))).sum(-1)
+        logp = logp_gauss - log_det - mu.shape[-1] * math.log(self.action_scale + 1e-12)
+        return a, logp
+
+
+class ValueFn(nn.Module):
+    def __init__(self, latent_dim: int, hidden: int = 256, depth: int = 2,
+                 task_dim: int = 0):
+        super().__init__()
+        self.net = mlp([latent_dim + task_dim] + [hidden] * depth + [1])
+        self.task_dim = task_dim
+
+    def forward(self, z: Tensor, tau: Tensor | None = None) -> Tensor:
+        x = torch.cat([z, tau], dim=-1) if self.task_dim else z
+        return self.net(x).squeeze(-1)

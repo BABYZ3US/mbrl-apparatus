@@ -1,0 +1,29 @@
+# Multi-task zero-shot generalization (uses scripts/train_multitask.py).
+# Science ablation: same command with penalty.schedule.lam0=0.
+defaults:
+  - base
+  - _self_
+
+experiment:
+  name: multitask
+
+env:
+  family: pendulum_target   # local default; halfcheetah_vel on Colab
+  name: ${env.family}       # for run naming
+
+tasks:
+  n_train: 8
+  split_seed: 0
+
+penalty:
+  include_task: true        # Hessian coords = (z, a, tau): smooth BETWEEN tasks.
+                            # false => curvature only within-task (mechanism ablation)
+
+imagination:
+  lambda_: 0.95             # Dreamer lambda-returns
+  entropy_coef: 3.0e-4
+  value_target_decay: 0.98
+
+training:
+  total_env_steps: 100000
+  eval_every_iters: 5

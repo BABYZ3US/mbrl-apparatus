@@ -1,0 +1,74 @@
+defaults:
+  - env: pendulum
+  - _self_
+
+seed: 0
+device: auto            # auto -> cuda if available else cpu
+
+experiment:
+  name: dev
+
+model:
+  latent_dim: 4         # compact-latent soft prior (R17) — sweep it, don't assume it
+  hidden: 256
+  depth: 2
+  ema_decay: 0.995
+
+penalty:
+  n_probes: 2           # validated default (R4); sweep {1,2,4,8} = experiment 3
+  form: frobenius       # frobenius | laplacian_trace (R5: same Euler-Lagrange)
+  clamp_trace: true     # laplacian_trace only: max(est, 0) per sample — the
+                        # 'thermodynamic consistency' clamp (original findings
+                        # report sec.3: clamped +41 beat Frobenius -40; unclamped -79).
+                        # 'clamped decaying trace' = this + a decaying schedule.
+  penalize_dynamics: false   # R+T optional (R8/R9); NEVER add policy (R10)
+  schedule:             # R12
+    kind: cuberoot      # cuberoot | step | cosine | constant | sin2chirp
+                        # sin2chirp: lam0*(t0/(t0+t))^(1/3)*sin^2(chirped phase) —
+                        # slow clamp/release cycles early, faster+smaller late;
+                        # needs total_steps for the chirp (else constant period0)
+    # period0: 20000    # sin2chirp: initial steps per oscillation
+    # period_end: 2000  # sin2chirp: final steps per oscillation
+    lam0: 1.0e-3        # NOTE: the original HalfCheetah recipe used lam=0.5
+                        # (findings report sec.7) — dose per environment; the
+                        # multitask F2 finding also says 1e-3 under-doses
+    t0: 10000
+    floor: 1.0e-5
+
+smoothing:              # DreamSmooth (recipe 2.5)
+  enabled: true
+  sigma: 1.5
+
+imagination:
+  horizon: 15           # long horizons enabled by curvature control (R15)
+  gamma: 0.99
+  lambda_: 0.95         # Dreamer lambda-returns
+  entropy_coef: 3.0e-4
+  value_target_decay: 0.98
+
+optim:
+  model_lr: 3.0e-4
+  policy_lr: 1.0e-4
+  value_lr: 3.0e-4
+  batch_size: 256
+  amp: true             # bf16 autocast for fit losses; penalty always fp32
+
+training:
+  total_env_steps: 100000
+  steps_per_iter: 1000      # env steps collected per outer iteration
+  model_updates_per_iter: 200
+  behaviour_updates_per_iter: 50
+  eval_every_iters: 5
+  num_envs: 4               # AsyncVectorEnv workers (CPU side of Mode A)
+
+checkpoint:
+  every: 2000
+  keep_last: 3
+  milestone_every: 100000
+  resume: auto              # auto | none | <path>
+  push_wandb: true
+
+logging:
+  project: mbrl-curvature
+  tensorboard: true
+  dir: results
