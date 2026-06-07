@@ -12,11 +12,13 @@ class LambdaSchedule:
                  t0: float = 10_000.0, floor: float = 0.0,
                  step_at: float = 0.5, step_factor: float = 0.1,
                  total_steps: int | None = None,
-                 period0: float = 20_000.0, period_end: float = 2_000.0):
+                 period0: float = 20_000.0, period_end: float = 2_000.0,
+                 period2: float = 10_000.0):
         self.kind, self.lam0, self.t0, self.floor = kind, lam0, t0, floor
         self.step_at, self.step_factor = step_at, step_factor
         self.total_steps = total_steps
         self.period0, self.period_end = period0, period_end
+        self.period2 = period2  # sincos: second oscillator (beat = 1/|1/p0-1/p2|)
 
     def __call__(self, t: int) -> float:
         if self.kind == "constant":
@@ -44,6 +46,23 @@ class LambdaSchedule:
                 env = self.t0 / (self.t0 + t)
                 phase = 2 * math.pi * f0 * t
             lam = self.lam0 * env * math.sin(phase) ** 2
+        elif self.kind == "sincos":
+            # Two-oscillator interference: lam0 * env * ((sin w1 t + cos w2 t)/2)^2.
+            # Different periods => beats — constructive interference (full-strength
+            # clamp) alternating with destructive phase cancellation (deep nulls,
+            # held off exact zero by the floor). Beat period = 1/|1/p0 - 1/p2|;
+            # same pow-free envelope as sin2chirp.
+            if self.total_steps:
+                env = max(1.0 - min(t / self.total_steps, 1.0), 0.0)
+            else:
+                env = self.t0 / (self.t0 + t)
+            s = math.sin(2 * math.pi * t / self.period0)
+            c = math.cos(2 * math.pi * t / self.period2)
+            # normalize by 4: with INDEPENDENT phases, full constructive
+            # interference reaches |sin + cos| = 2 (that's the beat peak), so
+            # (s+c)^2 <= 4 and the schedule tops out exactly at the envelope;
+            # destructive cancellation drops to the floor
+            lam = self.lam0 * env * 0.25 * (s + c) ** 2
         elif self.kind == "cosine":
             assert self.total_steps, "cosine schedule needs total_steps"
             frac = min(t / self.total_steps, 1.0)

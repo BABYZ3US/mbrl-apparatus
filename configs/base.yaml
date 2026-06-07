@@ -30,7 +30,10 @@ penalty:
     warmup_updates: 500 # model updates run at lam=0; dose measured on the tail 20%
     lam0_max: 10.0      # hard cap (small-init models start near-linear -> ratio can explode)
   schedule:             # R12
-    kind: cuberoot      # cuberoot | step | cosine | constant | sin2chirp
+    kind: cuberoot      # cuberoot | step | cosine | constant | sin2chirp | sincos
+                        # sincos: lam0*env*((sin 2pi t/period0 + cos 2pi t/period2)^2)/2
+                        # — two-oscillator interference; beat = 1/|1/p0 - 1/p2|
+    # period2: 10000    # sincos: second oscillator period
                         # sin2chirp: lam0*(1-t/T)*sin^2(chirped phase) — pow-free
                         # linear envelope; slow clamp/release cycles early,
                         # faster+smaller late; needs total_steps (else t0/(t0+t))

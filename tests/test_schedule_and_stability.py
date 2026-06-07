@@ -111,3 +111,27 @@ def test_penalty_never_touches_encoder():
     # ...and it DOES reach the reward model's weights
     assert any(p.grad is not None and p.grad.abs().sum() > 0
                for n, p in t.reward.named_parameters() if "weight" in n)
+
+
+def test_sincos_interference():
+    """Two-oscillator schedule: non-negative, envelope-bounded, and shows real
+    beats — windows of near-total phase cancellation AND windows of (near-)full
+    constructive amplitude, repeating at the beat period 1/|1/p0 - 1/p2|."""
+    T = 80_000
+    s = LambdaSchedule(kind="sincos", lam0=1e-2, floor=1e-6,
+                       period0=8_000, period2=10_000, total_steps=T)
+    ts = np.arange(0, T, 5)
+    vals = np.array([s(int(t)) for t in ts])
+    assert (vals >= 1e-6 - 1e-12).all()                      # never below floor
+    env = np.maximum(1e-2 * (1 - ts / T), 0)
+    # envelope bound (floor wins where the envelope decays below it)
+    assert (vals <= np.maximum(env, 1e-6) + 1e-9).all()
+    # beat period = 1/(1/8000 - 1/10000) = 40000 updates. Compare per-window
+    # peak-to-envelope ratios: a destructive window must be much weaker than a
+    # constructive one.
+    def win_ratio(lo, hi):
+        m = (ts >= lo) & (ts < hi)
+        return (vals[m] / np.maximum(env[m], 1e-12)).max()
+    ratios = [win_ratio(k * 5000, (k + 1) * 5000) for k in range(12)]
+    assert max(ratios) > 0.8       # constructive interference reaches near-full
+    assert min(ratios) < 0.25      # destructive cancellation produces deep nulls

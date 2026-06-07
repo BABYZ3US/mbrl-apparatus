@@ -45,6 +45,8 @@ PRESETS = {
         ("sched-cosine",   ["penalty.schedule.kind=cosine"]),
         ("sched-constant", ["penalty.schedule.kind=constant"]),
         ("sched-sin2chirp", ["penalty.schedule.kind=sin2chirp"]),
+        # two-oscillator interference: beats + phase-cancellation nulls
+        ("sched-sincos", ["penalty.schedule.kind=sincos"]),
         # floor hypothesis: lambda -> exactly 0 should degrade late training
         # if the user's MLP-collapse claim holds (vs sched-step, floor 1e-5)
         ("sched-step-zero", ["penalty.schedule.kind=step",
