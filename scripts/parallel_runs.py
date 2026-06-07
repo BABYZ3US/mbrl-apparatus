@@ -42,8 +42,10 @@ PRESETS = {
     # lambda-schedule ablation (validation item 8) on Pendulum
     "schedule_ablation": ("train.py", [
         ("sched-cuberoot", ["penalty.schedule.kind=cuberoot", "penalty.form=frobenius"]),
-        ("sched-step",     ["penalty.schedule.kind=step", "penalty.form=frobenius"]),
-        ("sched-cosine",   ["penalty.schedule.kind=cosine", "penalty.form=frobenius"]),
+        ("sched-step",     ["penalty.schedule.kind=step", "penalty.form=frobenius",
+                            "+penalty.schedule.total_steps=20000"]),
+        ("sched-cosine",   ["penalty.schedule.kind=cosine", "penalty.form=frobenius",
+                            "+penalty.schedule.total_steps=20000"]),
         ("sched-constant", ["penalty.schedule.kind=constant", "penalty.form=frobenius"]),
         ("sched-sin2chirp", ["penalty.schedule.kind=sin2chirp", "penalty.form=frobenius"]),
         # two-oscillator interference: beats + phase-cancellation nulls
@@ -58,6 +60,7 @@ PRESETS = {
         # floor hypothesis: lambda -> exactly 0 should degrade late training
         # if the user's MLP-collapse claim holds (vs sched-step, floor 1e-5)
         ("sched-step-zero", ["penalty.schedule.kind=step", "penalty.form=frobenius",
+                             "+penalty.schedule.total_steps=20000",
                              "penalty.schedule.floor=0"]),
         # the user's narrowed-down recipe: clamped decaying TRACE penalty
         ("sched-trace-chirp", ["penalty.schedule.kind=sin2chirp",

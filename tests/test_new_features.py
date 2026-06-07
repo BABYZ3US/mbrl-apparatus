@@ -276,3 +276,52 @@ def test_symexp_overflow_clamped_and_nan_hygiene():
     import numpy as np
     t.pen_ema = float("nan")
     assert t._imagination_horizon() == 5  # guard, not ValueError
+
+
+def test_data_driven_symexp_clamp_and_checkpoint_roundtrip(tmp_path):
+    """The symexp clamp is data-driven: bound = symexp_margin * running max
+    |symlog(r)| over real batches (replaces the fixed +-20, which allowed
+    symexp up to 4.8e8 and imagined-return variance up to 1e19 in low-lambda
+    windows). With rewards in [-12, 0], symlog_bound ~ log(13) ~ 2.565; even
+    absurd head outputs must symexp to at most ~ symexp(1.5 * 2.565) ~ 47."""
+    cfg = make_cfg(model={"symlog_reward": True, "reward_heads": 3},
+                   imagination={"pessimism": 0.5})
+    torch.manual_seed(0)
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    assert t.symlog_bound == 1.0  # conservative floor before any real data
+
+    # real batches with rewards in [-12, 0]
+    for seed in (1, 2):
+        obs, a, r, obs_next = fake_batch(n=64, seed=seed)
+        r = -12.0 * torch.rand(64, generator=torch.Generator().manual_seed(seed))
+        r[0] = -12.0  # pin the extreme so the expected bound is deterministic
+        t.model_update((obs, a, r, obs_next))
+    expected = symlog(torch.tensor(-12.0)).abs().item()  # log(13) ~ 2.565
+    assert t.symlog_bound == pytest.approx(expected, rel=1e-6)
+
+    # force absurd symlog-space head outputs (the extrapolation failure mode)
+    with torch.no_grad():
+        for head in t.reward.heads:
+            head.bias.fill_(500.0)
+    g = torch.Generator().manual_seed(3)
+    r_im, _ = t._imagined_reward(torch.randn(64, t.encoder.latent_dim, generator=g),
+                                 torch.randn(64, 1, generator=g))
+    assert torch.isfinite(r_im).all()
+    assert r_im.abs().max().item() < 100.0  # ~47 = symexp(1.5 * 2.565), not 4.8e8
+    assert r_im.abs().max().item() == pytest.approx(
+        symexp(torch.tensor(1.5 * expected)).item(), rel=1e-4)
+
+    # the bound survives a checkpoint round-trip (resume protocol)
+    cm = CheckpointManager(tmp_path, OmegaConf.to_container(cfg), every=10)
+    cm.save(t, env_steps=1, tag=f"step{t.step}")
+    t2 = Trainer(cfg, obs_dim=3, action_dim=1)
+    assert t2.symlog_bound == 1.0
+    assert cm.resume(t2) == 1
+    assert t2.symlog_bound == pytest.approx(t.symlog_bound, rel=0)
+    with torch.no_grad():
+        for head in t2.reward.heads:
+            head.bias.fill_(500.0)
+    g = torch.Generator().manual_seed(3)
+    r_im2, _ = t2._imagined_reward(torch.randn(64, t2.encoder.latent_dim, generator=g),
+                                   torch.randn(64, 1, generator=g))
+    assert r_im2.abs().max().item() < 100.0

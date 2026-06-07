@@ -52,6 +52,28 @@ penalty:
     t0: 10000
     floor: 1.0e-5
 
+spectral:               # closed-form RFF spectral reward (models/spectral.py)
+  enabled: false        # true => reward = SpectralReward ensemble; the MLP
+                        # reward fit loss AND its Hutchinson penalty are skipped
+                        # (the spectral H^2 penalty is exact); dynamics untouched
+  n_features: 512
+  sigma_w: 1.0          # scalar, OR a list = sigma LADDER (sigma parameterized
+                        # over the transform): feature blocks drawn per
+                        # bandwidth. Run-3 recipe: [0.25, 0.5, 1.0, 2.0] with a
+                        # band-differentiating poly (high-clamp: degrees [1,3],
+                        # coefs [0.1, 10.0]) — the ladder x polynomial
+                        # INTERACTION carries the benefit (+33.7% supervised;
+                        # claims_ledger bridge run 3; experiment/spectral_ladder)
+  refit_every: 200      # model updates between closed-form refits
+  cache_size: 4096      # rolling (x, symlog-target) cache feeding the refit
+  heads: 3              # independent frequency draws = cheap exact ensemble
+  poly:                 # P(|w|^2) ridge weights; default = pure quartic (H^2)
+    degrees: [2]        # |w|^(2*2) = |w|^4
+    coefs: [1.0]
+    shifts: [0]         # per-degree time-shift (model updates) applied to the
+                        # lambda schedule: theta_d(t) = coefs[d]*lam(t+shifts[d])
+                        # -> phase-shifted band tuning across training
+
 smoothing:              # DreamSmooth (recipe 2.5)
   enabled: true
   sigma: 1.5
@@ -63,6 +85,7 @@ imagination:
   entropy_coef: 3.0e-4
   value_target_decay: 0.98
   pessimism: 0.5        # imagined reward = ensemble mean - pessimism * std
+  symexp_margin: 1.5    # symexp clamp = margin * running max |symlog(r)| from real batches
   adaptive_horizon:     # curvature-certified horizon: longer as penalty EMA falls
     enabled: true
     h_min: 5

@@ -53,6 +53,76 @@ Multi-kernel Hessian constraints triangulate the latent representation via inter
 of Sobolev balls (holographic encoding at critical dimension d = 4); the variational
 principle is a biharmonic field theory with EL equation λ∇⁴R + (R − r) = 0.
 
+## The Weil-positivity identification (user, 2026-06-07 — conjecture tier)
+
+The clamp's missing spectral analog (the open question from the spectral solver: the
+max(est,0) coherence rectifier has no diagonal form in frequency space) is identified
+by the user as **Weil positivity** — the explicit-formula positivity criterion. The
+structural correspondence: both demand non-negativity of a quadratic functional tested
+in a spectral dual domain (clamp: per-sample sign-coherence of the curvature quadratic
+form; Weil: W(g⋆g̃) ≥ 0 over a test class). Status (updated 2026-06-07, per user): **the user asserts this is the real
+identification, not an analogy — it is the object they have been working on in the
+parent math project**, where the derivation lives. This crossing of the founding doc's
+RH/Connes firewall is therefore intentional and user-authorized; the derivation is not
+reproduced or verified in this repo. What is testable HERE, with no RH machinery: if
+the clamp IS Weil positivity in the RFF dual, then a positivity-constrained spectral
+solve (curvature-density positivity as the constraint class) should reproduce the
+clamped-trace penalty's empirical advantage (+41 vs −40, report sec.3) in closed form
+— same ordering, no Hutchinson, no clamp heuristic. That experiment is the bridge
+between the two projects and the next natural build.
+
+**Bridge run 1 (2026-06-07, `scripts/bridge_experiment.py`): NOT SUPPORTED — 0/9
+cells.** Closed-form supervised proxy (competent-policy Pendulum, noisy train/val
+targets σ=1, clean test; arms scale-matched in expectation to diag(|w|⁴), verified
+in `tests/test_bridge.py`). Predicted ordering lap2_positive < frobenius_diag <
+lap2_indefinite held in 0/9 cells; the positivity arm lost to the diagonal
+Frobenius arm in 9/9 (n=8192 means: 0.107 vs 0.012 test MSE), robust to a λ sweep
+spanning 1e-6..1e4. Diagnosis: the exact per-sample Gram penalty c'Gc constrains
+curvature only on the span of the data-evaluated Laplacian vectors — data-null
+frequency directions go unpenalized and absorb target noise; the isotropic
+expectation penalty constrains every band. Pointwise positivity of the curvature
+density, by itself, did NOT reproduce the clamp's advantage here. Caveats: (1)
+supervised-MSE proxy for an RL-return ordering; (2) one constraint-class
+construction tested (PSD Gram of the exact Laplacian density) — sign-coherence
+cone constraints or hybrid diag+Gram forms are untested; (3) the clamp's
+interaction with nonstationary RL training dynamics is not represented in a
+single linear solve. The identification is not refuted, but its first concrete
+prediction failed; any stated claim must say so.
+
+**Bridge run 2 (2026-06-07, hybrid + angle sweep): wide-cut + sharp-transverse-cut
+SUPPORTED, with a confound to resolve.** (a) Hybrid arm α·diag(|w|⁴)+(1−α)·M·G
+beats diag-only in 7/9 cells, mean +6.5% relative test-MSE (gains concentrated at
+n=512 — the scarce-data regime where constraint intersection should matter; n≥2048
+gains within noise). (b) `--angle-sweep`: varying RFF bandwidth σ_w ∈ [0.5, 4]
+moves the diag-vs-Gram Frobenius angle across 64.8–79.3° and the hybrid benefit
+tracks it — Spearman(angle, benefit) = **+0.63** (n=20); at the widest angles
+(σ_w=0.5, ~78–79°) benefit reaches +24–45%, at the narrowest (~65–70°) it vanishes
+or goes negative. Matches the multi-kernel prediction that benefit grows with
+constraint misalignment, and the measured angles overlap the 60–71° reward/dynamics
+Hessian range. CONFOUND: angle is nearly a deterministic function of σ_w in this
+design, so "angle causes benefit" is not separated from "bandwidth causes benefit";
+within fixed σ_w the across-seed angle variation is too small to test. Deconfounding
+needs an angle knob at fixed bandwidth (e.g., anisotropic W draws). Practical note:
+σ_w=0.5 also has the best absolute MSE — low bandwidth + hybrid is the recommended
+closed-form recipe pending the deconfound.
+
+**Bridge run 3 (2026-06-07, `--recipe`): sigma parameterized over the transform ×
+lambda polynomial is the winning recipe — user's suspicion confirmed.** Multi-scale
+RFF frame (log-spaced σ ladder 0.25–2.0 across feature blocks) vs single σ=0.5
+baseline, n∈{512, 2048}, 5 seeds: ladder alone +6.6% (6/10 wins); ladder + λ
+polynomial **+33.7% (10/10)**; + Gram transverse cut **+36.8% (10/10)**. Mechanism:
+the polynomial needs real band separation to act on — a single σ gives a narrow |w|
+spread, the ladder gives the polynomial distinct bands to dose (winning shapes:
+high-clamp, quartic+sextic — suppress high-σ blocks hard, spare low). The Gram cut
+adds ~3pp, always at low α (sharp cut as minority partner). The interaction term,
+not either ingredient alone, carries the effect. PORTED TO THE TRAINER (2026-06-07):
+`spectral.sigma_w` accepts a list (sigma ladder over feature blocks; scalar path
+bitwise-unchanged, ladder survives checkpoint resume via saved W);
+`configs/experiment/spectral_ladder.yaml` = the run-3 recipe as a preset arm. RL
+validation still pending: compare spectral_ladder vs single-sigma spectral control
+vs sched-* arms on Pendulum, >= 3 seeds — the supervised +33.7% is NOT yet an RL
+claim.
+
 ## The schedule hypothesis (user, 2026-06-06 — drives the schedule ablation)
 
 Stated form: high λ early produces a smooth, general mapping of the reward manifold

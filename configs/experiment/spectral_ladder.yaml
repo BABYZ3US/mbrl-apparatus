@@ -1,0 +1,17 @@
+# Bridge run 3 recipe in the RL loop: sigma ladder x lambda polynomial.
+# Supervised result (scripts/bridge_experiment.py --recipe): ladder alone +6.6%,
+# ladder + polynomial +33.7%, both 10/10 cells at the poly arm — the INTERACTION
+# carries it. This config ports the winning combination to the Trainer; compare
+# against sched-* arms and a single-sigma spectral control on Pendulum, >= 3 seeds.
+defaults:
+  - /base
+experiment:
+  name: spectral_ladder
+spectral:
+  enabled: true
+  sigma_w: [0.25, 0.5, 1.0, 2.0]   # sigma parameterized over the transform
+  poly:                            # high-clamp shape: spare the low-sigma
+    degrees: [1, 3]                # blocks, suppress the high-sigma blocks
+    coefs: [0.1, 10.0]
+    shifts: [0, 0]                 # no phase shift to start; the per-degree
+                                   # schedule shifts are a follow-up ablation

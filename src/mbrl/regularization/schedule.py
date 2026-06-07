@@ -33,6 +33,12 @@ class LambdaSchedule:
             self.period2 = period0 / 1.6180339887498949
         else:
             self.period2 = period2
+        # fail FAST at construction (not at the first model update, after wandb
+        # is already up — the schedule-ablation step/cosine arms died that way)
+        if kind in ("step", "cosine") and not total_steps:
+            raise ValueError(
+                f"schedule kind={kind!r} requires total_steps "
+                f"(+penalty.schedule.total_steps=<model updates>)")
 
     def __call__(self, t: int) -> float:
         if self.kind == "constant":
@@ -40,7 +46,6 @@ class LambdaSchedule:
         elif self.kind == "cuberoot":          # R12 theory profile
             lam = self.lam0 * (self.t0 / (self.t0 + t)) ** (1.0 / 3.0)
         elif self.kind == "step":              # strong, then release
-            assert self.total_steps, "step schedule needs total_steps"
             lam = self.lam0 * (self.step_factor if t >= self.step_at * self.total_steps else 1.0)
         elif self.kind == "sin2chirp":
             # lam0 * envelope(t) * sin^2(phi(t)): strictly non-negative; a
@@ -78,7 +83,6 @@ class LambdaSchedule:
             # destructive cancellation drops to the floor
             lam = self.lam0 * env * 0.25 * (s + c) ** 2
         elif self.kind == "cosine":
-            assert self.total_steps, "cosine schedule needs total_steps"
             frac = min(t / self.total_steps, 1.0)
             lam = self.floor + 0.5 * (self.lam0 - self.floor) * (1 + math.cos(math.pi * frac))
         else:

@@ -18,6 +18,7 @@ import torch.nn.functional as F
 
 from ..models import Encoder, EMAEncoder, AffineDynamics, RewardModel, Policy, ValueFn
 from ..models.reward import symlog, symexp
+from ..models.spectral import SpectralReward, poly_weights
 from ..regularization.hutchinson import hvp_penalty, laplacian_trace_penalty
 from ..regularization.schedule import LambdaSchedule
 from ..training.returns import lambda_returns
@@ -41,6 +42,14 @@ class Trainer:
         self.reward = RewardModel(k, action_dim, h, d, task_dim=task_dim,
                                   n_heads=int(cfg.model.get("reward_heads", 1))).to(device)
         self.pessimism = float(cfg.imagination.get("pessimism", 0.0))
+        # Data-driven symexp clamp (replaces the fixed +-20): running max of
+        # |symlog(r_target)| over real batches; imagination clamps head outputs
+        # to +-(symexp_margin * symlog_bound) before symexp. The fixed +-20
+        # allowed symexp up to 4.8e8 — imagined-return variance reached 1e19
+        # concentrated in low-lambda windows (38/100 iterations on the last
+        # grid). Init 1.0 = conservative floor before any real data is seen.
+        self.symlog_bound = 1.0  # checkpointed (bitwise resume)
+        self.symexp_margin = float(cfg.imagination.get("symexp_margin", 1.5))
         self.policy = Policy(k, action_dim, h, d, task_dim=task_dim).to(device)
         self.value = ValueFn(k, h, d, task_dim=task_dim).to(device)
         self.value_target = copy.deepcopy(self.value).requires_grad_(False)
@@ -87,6 +96,67 @@ class Trainer:
         self.ah_decay = float(ah.get("decay", 0.99)) if ah else 0.99
         self.pen_ema, self.pen_peak = None, 0.0  # checkpointed
 
+        # Spectral reward path (spectral.enabled): the reward is an ensemble of
+        # closed-form RFF ridge heads over the SAME coords as the penalty
+        # (z.detach(), a[, tau]); refit every refit_every model updates from a
+        # rolling (x, symlog-target) cache with POLYNOMIAL per-band penalty
+        # weights — theta_d(t) = coefs[d] * lam(t + shifts[d]) per degree, so
+        # frequency bands clamp/release at different phases of the schedule.
+        # The H^2 penalty is EXACT in this basis: no Hutchinson on the reward,
+        # no reward fit loss for the MLP (the MLP reward model is bypassed).
+        sp = cfg.get("spectral", None)
+        self.spec_enabled = bool(sp and sp.get("enabled", False))
+        if self.spec_enabled:
+            self.spec_refit_every = int(sp.get("refit_every", 200))
+            self.spec_cache_size = int(sp.get("cache_size", 4096))
+            poly = sp.get("poly", None)
+            self.spec_degrees = [int(d) for d in poly.get("degrees", [2])] if poly else [2]
+            self.spec_coefs = [float(c) for c in poly.get("coefs", [1.0])] if poly else [1.0]
+            shifts = (poly.get("shifts", None) if poly else None) or [0] * len(self.spec_degrees)
+            self.spec_shifts = [int(s) for s in shifts]
+            if not (len(self.spec_degrees) == len(self.spec_coefs) == len(self.spec_shifts)):
+                raise ValueError("spectral.poly degrees/coefs/shifts must have equal length")
+            spec_in = k + action_dim + task_dim
+            sw = sp.get("sigma_w", 1.0)
+            try:                       # scalar, or a list = sigma LADDER
+                sw = float(sw)         # (multi-scale frame; bridge run 3)
+            except (TypeError, ValueError):
+                sw = [float(s) for s in sw]
+            self.spec_heads = [
+                SpectralReward(spec_in, n_features=int(sp.get("n_features", 512)),
+                               sigma_w=sw,
+                               seed=int(cfg.seed) * 1000 + i, device=device)
+                for i in range(int(sp.get("heads", 3)))]
+            self.spec_cache_x = torch.zeros(0, spec_in)   # rolling FIFO (CPU)
+            self.spec_cache_y = torch.zeros(0)
+            self.spec_since_refit = 0   # model updates since last refit
+            self.spec_refits = 0        # 0 => heads still predict zeros (logged)
+
+    # ---------------- spectral reward (closed-form RFF ridge ensemble) ----------------
+    def _spectral_band_weights(self, head, t: int) -> torch.Tensor:
+        """Per-feature ridge weights at model-update time t:
+        sum_d coefs[d] * lam(t + shifts[d]) * |w_j|^(2*degrees[d]).
+        Per-degree time SHIFTS phase-shift the lambda schedule so different
+        frequency bands clamp/release at different points of training."""
+        theta = [c * self.lam(t + s) for c, s in zip(self.spec_coefs, self.spec_shifts)]
+        return poly_weights(head.w2.sqrt(), self.spec_degrees, theta)
+
+    def _spectral_refit(self):
+        """Refit ALL heads on the full rolling cache with the poly weights at
+        the current t — one (M, M) solve per head, ~0.04s wall."""
+        X = self.spec_cache_x.to(self.device)
+        y = self.spec_cache_y.to(self.device)
+        for head in self.spec_heads:
+            head.fit(X, y, weights=self._spectral_band_weights(head, self.step))
+        self.spec_refits += 1
+        self.spec_since_refit = 0
+
+    def _spectral_penalty_value(self) -> float:
+        """EXACT mean-over-heads E_x ||grad^2 R||_F^2 — replaces the Hutchinson
+        estimate in penalty/value so auto-dose, the adaptive horizon, and the
+        dashboards keep working unchanged."""
+        return sum(h.hessian_frobenius_sq() for h in self.spec_heads) / len(self.spec_heads)
+
     # ---------------- model learning ----------------
     def model_update(self, batch) -> dict:
         if self.task_dim:
@@ -102,23 +172,42 @@ class Trainer:
         # reward model predicts symlog(r) when model.symlog_reward is on;
         # imagination applies symexp to whatever it consumes (behaviour_update)
         r_target = symlog(r) if self.symlog else r
-        rew_loss = F.mse_loss(self.reward(z, a, tau), r_target)
-
-        # Isotropic curvature penalty in joint latent(-task) coords (R4, R16);
-        # detached coords: penalize R's surface geometry, not the encoder through it.
-        # Including tau in the Hessian coords enforces smooth interpolation
-        # BETWEEN tasks — the multi-task generalization lever.
-        parts = [z.detach(), a]
-        if tau is not None and self.cfg.penalty.get("include_task", True):
-            parts.append(tau)
-        x_pen = torch.cat(parts, dim=-1)
-        # Penalty target = head mean on the model's raw (symlog-space) output —
-        # smoothness is enforced in prediction space (see RewardModel.on_concat).
-        if tau is not None and not self.cfg.penalty.get("include_task", True):
-            fn = lambda x: self.reward.on_concat(
-                torch.cat([x, tau.detach()], dim=-1))
+        if self.symlog:  # track the real-data symlog range for the imagination clamp
+            batch_max = r_target.abs().max().item()
+            if np.isfinite(batch_max):  # NaN hygiene: never poison the bound
+                self.symlog_bound = max(self.symlog_bound, batch_max)
+        spec_metrics = {}
+        if self.spec_enabled:
+            # Spectral reward path: no MLP reward fit loss — the closed-form
+            # heads are refit from the rolling cache instead. Cache rows live
+            # in the SAME coords as the penalty: cat(z.detach(), a[, tau]).
+            parts_s = [z.detach(), a.detach()]
+            if tau is not None:
+                parts_s.append(tau.detach())
+            x_spec = torch.cat(parts_s, dim=-1)
+            self.spec_cache_x = torch.cat(
+                [self.spec_cache_x, x_spec.cpu()])[-self.spec_cache_size:]
+            self.spec_cache_y = torch.cat(
+                [self.spec_cache_y, r_target.detach().cpu()])[-self.spec_cache_size:]
+            self.spec_since_refit += 1
+            # First refit as soon as the cache holds >= n_features rows (keeps
+            # the (M, M) solve well-posed); then every refit_every updates.
+            # Before the first refit the heads predict zeros — logged below.
+            if (self.spec_cache_x.shape[0] >= self.spec_heads[0].M
+                    and (self.spec_refits == 0
+                         or self.spec_since_refit >= self.spec_refit_every)):
+                self._spectral_refit()
+            with torch.no_grad():  # diagnostic only: ensemble-mean fit MSE
+                pred = torch.stack([h.predict(x_spec) for h in self.spec_heads]).mean(0)
+                rew_loss_val = F.mse_loss(pred, r_target).item()
+            rew_loss = None
+            spec_metrics = {"spectral/refits": self.spec_refits,
+                            "spectral/cache_n": self.spec_cache_x.shape[0],
+                            "spectral/fitted": float(self.spec_refits > 0)}
         else:
-            fn = self.reward.on_concat
+            rew_loss = F.mse_loss(self.reward(z, a, tau), r_target)
+            rew_loss_val = rew_loss.item()
+
         # form dispatch (R5: same Euler-Lagrange; both unbiased at >=2 probes).
         # 'laplacian_trace' + a clamped decaying schedule (sin2chirp) is the
         # user's narrowed-down active ingredient from the original experiments.
@@ -129,8 +218,29 @@ class Trainer:
                 clamp=self.cfg.penalty.get("clamp_trace", True))
         else:
             penalty_fn = hvp_penalty
-        pen = penalty_fn(fn, x_pen, n_probes=self.cfg.penalty.n_probes,
-                         generator=self.gen)
+        if self.spec_enabled:
+            # The Hutchinson penalty on the reward is SKIPPED: the spectral
+            # heads' H^2 penalty is EXACT and already inside the closed-form
+            # refit. Only the optional dynamics term remains stochastic.
+            pen = torch.zeros((), device=self.device)
+        else:
+            # Isotropic curvature penalty in joint latent(-task) coords (R4, R16);
+            # detached coords: penalize R's surface geometry, not the encoder through it.
+            # Including tau in the Hessian coords enforces smooth interpolation
+            # BETWEEN tasks — the multi-task generalization lever.
+            parts = [z.detach(), a]
+            if tau is not None and self.cfg.penalty.get("include_task", True):
+                parts.append(tau)
+            x_pen = torch.cat(parts, dim=-1)
+            # Penalty target = head mean on the model's raw (symlog-space) output —
+            # smoothness is enforced in prediction space (see RewardModel.on_concat).
+            if tau is not None and not self.cfg.penalty.get("include_task", True):
+                fn = lambda x: self.reward.on_concat(
+                    torch.cat([x, tau.detach()], dim=-1))
+            else:
+                fn = self.reward.on_concat
+            pen = penalty_fn(fn, x_pen, n_probes=self.cfg.penalty.n_probes,
+                             generator=self.gen)
         if self.cfg.penalty.penalize_dynamics:  # optional transversal term (R8/R9)
             k = z.shape[-1]
             fn_t = lambda x: self.dynamics(x[..., :k], x[..., k:k + a.shape[-1]]).sum(-1)
@@ -138,13 +248,19 @@ class Trainer:
             pen = pen + penalty_fn(fn_t, za, n_probes=self.cfg.penalty.n_probes,
                                    generator=self.gen)
 
+        # penalty/value: spectral => EXACT mean-over-heads H^2 (auto-dose,
+        # adaptive horizon, dashboards consume it unchanged); else Hutchinson.
+        pen_val = self._spectral_penalty_value() if self.spec_enabled else pen.item()
+
         # ---- auto-dosed lambda: lam=0 during warmup, then dose lam0 once ----
         if self.ad_enabled and self.ad_count < self.ad_warmup:
             lam_t = 0.0
             self.ad_count += 1
             if self.ad_count > self.ad_tail_start:  # tail window only
-                self.ad_fit_sum += dyn_loss.item() + rew_loss.item()
-                self.ad_pen_sum += pen.item()
+                # spectral: the MLP reward fit doesn't exist — dose on dyn only
+                self.ad_fit_sum += dyn_loss.item() + (
+                    0.0 if self.spec_enabled else rew_loss.item())
+                self.ad_pen_sum += pen_val
             if self.ad_count == self.ad_warmup:
                 n_tail = self.ad_warmup - self.ad_tail_start
                 mean_fit = self.ad_fit_sum / n_tail
@@ -155,7 +271,10 @@ class Trainer:
                 self.lam.lam0 = self.lam0_auto
         else:
             lam_t = self.lam(self.step)
-        loss = dyn_loss + rew_loss + lam_t * pen
+        if rew_loss is None:  # spectral: the MLP reward fit is skipped entirely
+            loss = dyn_loss + lam_t * pen
+        else:
+            loss = dyn_loss + rew_loss + lam_t * pen  # original op order (bitwise)
 
         self.model_opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -165,18 +284,17 @@ class Trainer:
         self.step += 1
 
         # penalty EMA + running peak — the adaptive-horizon certificate signal.
-        # NaN hygiene: one non-finite pen.item() must not poison the EMA forever
-        # (a poisoned EMA crashed the horizon controller in the shiny run).
+        # NaN hygiene: one non-finite penalty value must not poison the EMA
+        # forever (a poisoned EMA crashed the horizon controller in the shiny run).
         import math as _math
-        pen_val = pen.item()
         if _math.isfinite(pen_val):
             self.pen_ema = (pen_val if self.pen_ema is None
                             else self.ah_decay * self.pen_ema + (1 - self.ah_decay) * pen_val)
             self.pen_peak = max(self.pen_peak, self.pen_ema)
 
-        out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss.item(),
+        out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss_val,
                "penalty/value": pen_val, "penalty/lambda": lam_t,
-               "loss/total": loss.item(), "step": self.step}
+               "loss/total": loss.item(), "step": self.step, **spec_metrics}
         if self.lam0_auto is not None:
             out["penalty/lam0_auto"] = self.lam0_auto
         return out
@@ -184,14 +302,24 @@ class Trainer:
     def _imagined_reward(self, z, a, tau=None):
         """Reward as consumed by imagination: per-head symexp (if the model is
         trained in symlog space), then ensemble mean - pessimism * std.
-        Returns (reward (B,), mean head disagreement scalar)."""
-        heads = self.reward.all_heads(z, a, tau)          # (n_heads, B)
+        Returns (reward (B,), mean head disagreement scalar).
+        Spectral path: per-head closed-form predict — cos features, fully
+        differentiable in (z, a) so the policy gradient flows through it."""
+        if self.spec_enabled:
+            parts = [z, a] if tau is None else [z, a, tau]
+            x = torch.cat(parts, dim=-1)
+            heads = torch.stack([h.predict(x) for h in self.spec_heads])  # (heads, B)
+        else:
+            heads = self.reward.all_heads(z, a, tau)      # (n_heads, B)
         if self.symlog:
             # Clamp BEFORE symexp: imagined rollouts extrapolate, and
             # expm1(|x| > ~89) overflows float32 -> inf rewards -> NaN policy
-            # (the shiny-run crash). +-20 in symlog space is +-4.8e8 raw —
-            # far beyond any real reward, harmless to fitting.
-            heads = symexp(heads.clamp(-20.0, 20.0))
+            # (the shiny-run crash). The bound is DATA-DRIVEN: margin * the
+            # running max |symlog(r)| seen in real batches — the old fixed
+            # +-20 still allowed symexp up to 4.8e8, which drove imagined
+            # return variance to 1e19 in low-lambda windows.
+            bound = self.symexp_margin * self.symlog_bound
+            heads = symexp(heads.clamp(-bound, bound))
         if heads.shape[0] == 1:
             return heads[0], heads.new_zeros(())
         std = heads.std(0)
@@ -292,7 +420,7 @@ class Trainer:
 
     # ---------------- checkpoint protocol ----------------
     def state_dict(self):
-        return {"encoder": self.encoder.state_dict(), "ema": self.ema.state_dict(),
+        sd = {"encoder": self.encoder.state_dict(), "ema": self.ema.state_dict(),
                 "dynamics": self.dynamics.state_dict(), "reward": self.reward.state_dict(),
                 "policy": self.policy.state_dict(), "value": self.value.state_dict(),
                 "value_target": self.value_target.state_dict(),
@@ -300,6 +428,8 @@ class Trainer:
                 "policy_opt": self.policy_opt.state_dict(),
                 "value_opt": self.value_opt.state_dict(), "step": self.step,
                 "ret_scale": self.ret_scale,
+                # data-driven symexp clamp bound (bitwise resume)
+                "symlog_bound": self.symlog_bound,
                 # auto-dose: computed lam0 + warmup accumulators (bitwise resume)
                 "lam0_sched": self.lam.lam0, "lam0_auto": self.lam0_auto,
                 "ad_count": self.ad_count, "ad_fit_sum": self.ad_fit_sum,
@@ -307,6 +437,16 @@ class Trainer:
                 # adaptive-horizon certificate state
                 "pen_ema": self.pen_ema, "pen_peak": self.pen_peak,
                 "hutchinson_gen": self.gen.get_state()}
+        if self.spec_enabled:
+            # spectral reward: per-head (W, b, c) + the rolling cache + refit
+            # counters — everything needed for bitwise resume of the closed-
+            # form path (W/b are seed-derived but saved anyway: cheap insurance)
+            sd["spectral"] = {
+                "heads": [{"W": h.W.cpu(), "b": h.b.cpu(), "c": h.c.cpu()}
+                          for h in self.spec_heads],
+                "cache_x": self.spec_cache_x, "cache_y": self.spec_cache_y,
+                "since_refit": self.spec_since_refit, "refits": self.spec_refits}
+        return sd
 
     def load_state_dict(self, sd):
         self.encoder.load_state_dict(sd["encoder"]); self.ema.load_state_dict(sd["ema"])
@@ -319,6 +459,7 @@ class Trainer:
         self.value_opt.load_state_dict(sd["value_opt"])
         self.step = sd["step"]
         self.ret_scale = sd.get("ret_scale", 1.0)
+        self.symlog_bound = sd.get("symlog_bound", 1.0)
         if "lam0_sched" in sd:  # auto-dose may have rewritten the schedule's lam0
             self.lam.lam0 = sd["lam0_sched"]
         self.lam0_auto = sd.get("lam0_auto", None)
@@ -329,6 +470,18 @@ class Trainer:
         self.pen_peak = sd.get("pen_peak", 0.0)
         if "hutchinson_gen" in sd:  # probe RNG must resume too (bitwise resume)
             self.gen.set_state(sd["hutchinson_gen"])
+        if self.spec_enabled and "spectral" in sd:
+            sp = sd["spectral"]
+            for head, hs in zip(self.spec_heads, sp["heads"]):
+                head.W = hs["W"].to(head.device)
+                head.b = hs["b"].to(head.device)
+                head.c = hs["c"].to(head.device)
+                head.w2 = head.W.pow(2).sum(-1)
+                head.w4 = head.w2.pow(2)
+            self.spec_cache_x = sp["cache_x"].clone()
+            self.spec_cache_y = sp["cache_y"].clone()
+            self.spec_since_refit = sp["since_refit"]
+            self.spec_refits = sp["refits"]
 
 
 def collect_vectorized(trainer, env, buffer, obs, autoreset, n_steps: int,

@@ -1,0 +1,119 @@
+<svg viewBox="0 0 1280 920" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0e7490"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1280" height="920" fill="#ffffff"/>
+  <text x="24" y="34" font-size="20" font-weight="bold" fill="#0f172a">Curvature-regularized MBRL — spectral reward architecture (closed-form path, spectral.enabled)</text>
+  <text x="24" y="54" font-size="12" fill="#64748b">src/mbrl: models/{encoder,dynamics,spectral,policy}.py, training/loop.py, regularization/{hutchinson,schedule}.py — recipe of bridge runs 2–3 (claims_ledger.md)</text>
+
+  <!-- ============ Row 1: env + replay ============ -->
+  <rect x="24" y="80" width="190" height="86" rx="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="119" y="104" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">Environment</text>
+  <text x="119" y="124" font-size="12" fill="#334155" text-anchor="middle">Pendulum / MuJoCo</text>
+  <text x="119" y="142" font-size="12" fill="#334155" text-anchor="middle">(obs, a, r, obs′) → replay</text>
+
+  <rect x="262" y="80" width="200" height="86" rx="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="362" y="104" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">Encoder  (+ EMA copy)</text>
+  <text x="362" y="124" font-size="12" fill="#334155" text-anchor="middle">z = LayerNorm(MLP(obs)) ∈ ℝᵏ</text>
+  <text x="362" y="142" font-size="12" fill="#334155" text-anchor="middle">k ≤ 4·obs_dim (latent cap v2)</text>
+  <text x="362" y="158" font-size="11" fill="#64748b" text-anchor="middle">targets: z′ = EMA-encoder(obs′)</text>
+
+  <rect x="510" y="80" width="270" height="86" rx="8" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="645" y="104" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">Affine latent dynamics</text>
+  <text x="645" y="126" font-size="13" fill="#0f172a" text-anchor="middle">ẑ′ = z + f(z) + G(z)·a</text>
+  <text x="645" y="146" font-size="12" fill="#334155" text-anchor="middle">L_dyn = ‖ẑ′ − z′_EMA‖²</text>
+
+  <line x1="214" y1="123" x2="258" y2="123" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="462" y1="123" x2="506" y2="123" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============ Spectral reward stack ============ -->
+  <rect x="24" y="200" width="756" height="400" rx="10" fill="#ecfeff" stroke="#0e7490" stroke-width="2"/>
+  <text x="40" y="226" font-size="15" font-weight="bold" fill="#155e75">Spectral reward stack — closed form, no Hutchinson on R, no Adam (models/spectral.py)</text>
+
+  <rect x="40" y="242" width="330" height="84" rx="8" fill="#ffffff" stroke="#0e7490" stroke-width="1.2"/>
+  <text x="52" y="262" font-size="13" font-weight="bold" fill="#155e75">Rolling cache (FIFO, 4096)</text>
+  <text x="52" y="282" font-size="12.5" fill="#0f172a">x = [ z.detach(), a (, τ) ]   —   penalty coords</text>
+  <text x="52" y="300" font-size="12.5" fill="#0f172a">y = symlog(r)</text>
+  <text x="52" y="317" font-size="11" fill="#64748b">refit when |cache| ≥ M, then every refit_every updates</text>
+
+  <rect x="40" y="342" width="330" height="116" rx="8" fill="#ffffff" stroke="#0e7490" stroke-width="1.2"/>
+  <text x="52" y="362" font-size="13" font-weight="bold" fill="#155e75">Random Fourier features — σ ladder</text>
+  <text x="52" y="384" font-size="13" fill="#0f172a">φⱼ(x) = √(2/M) cos(wⱼ·x + bⱼ)</text>
+  <text x="52" y="404" font-size="13" fill="#0f172a">wⱼ ~ 𝒩(0, σ²₍ₖ₎ I),  bⱼ ~ U[0, 2π)</text>
+  <text x="52" y="424" font-size="12.5" fill="#0f172a">σ over the transform: block k of M/K features at σₖ,</text>
+  <text x="52" y="441" font-size="12.5" fill="#0f172a">σ = [0.25, 0.5, 1.0, 2.0] → separated frequency bands</text>
+
+  <rect x="402" y="242" width="358" height="120" rx="8" fill="#ffffff" stroke="#0e7490" stroke-width="1.2"/>
+  <text x="414" y="262" font-size="13" font-weight="bold" fill="#155e75">λ-polynomial band weights (per-degree schedule shifts)</text>
+  <text x="414" y="286" font-size="13.5" fill="#0f172a">θⱼ(t) = Σ_d  c_d · λ(t + s_d) · |wⱼ|^(2·deg_d)</text>
+  <text x="414" y="308" font-size="12.5" fill="#0f172a">run-3 shape “high-clamp”: deg = [1, 3], c = [0.1, 10]</text>
+  <text x="414" y="326" font-size="12.5" fill="#0f172a">— spare low-σ blocks, suppress high-σ blocks</text>
+  <text x="414" y="348" font-size="11" fill="#64748b">λ(t): cuberoot / sin² chirp / sincos (commensurate f₂ = m·f₁), floor &gt; 0</text>
+
+  <rect x="402" y="378" width="358" height="80" rx="8" fill="#ffffff" stroke="#0e7490" stroke-width="1.2"/>
+  <text x="414" y="398" font-size="13" font-weight="bold" fill="#155e75">Closed-form weighted ridge (one (M,M) solve / head)</text>
+  <text x="414" y="424" font-size="14" fill="#0f172a">ĉ = (ΦᵀΦ + diag(θ(t)) + εI)⁻¹ Φᵀ y</text>
+  <text x="414" y="446" font-size="12" fill="#64748b">ensemble: 3 heads, independent W draws;  R(x) = Σⱼ ĉⱼ φⱼ(x)</text>
+
+  <rect x="40" y="478" width="720" height="104" rx="8" fill="#ffffff" stroke="#0e7490" stroke-width="1.2"/>
+  <text x="52" y="498" font-size="13" font-weight="bold" fill="#155e75">Exact curvature penalty (diagonal in frequency space — replaces Hutchinson on R)</text>
+  <text x="52" y="524" font-size="14" fill="#0f172a">E‖∇²R‖²_F  =  E(ΔR)²  =  (1/M) Σⱼ ĉⱼ² |wⱼ|⁴</text>
+  <text x="52" y="546" font-size="12" fill="#64748b">cross terms vanish over phases (rank-1 feature Hessians ⇒ ‖wwᵀ‖²_F = (tr wwᵀ)²) — the null-Lagrangian</text>
+  <text x="52" y="563" font-size="12" fill="#64748b">equivalence holds exactly-in-expectation; value feeds auto-dose + the adaptive horizon certificate</text>
+
+  <line x1="370" y1="284" x2="398" y2="284" stroke="#0e7490" stroke-width="1.5" marker-end="url(#arrg)"/>
+  <line x1="370" y1="400" x2="398" y2="400" stroke="#0e7490" stroke-width="1.5" marker-end="url(#arrg)"/>
+  <line x1="581" y1="362" x2="581" y2="374" stroke="#0e7490" stroke-width="1.5" marker-end="url(#arrg)"/>
+  <line x1="400" y1="458" x2="400" y2="474" stroke="#0e7490" stroke-width="1.5" marker-end="url(#arrg)"/>
+
+  <!-- z,a feed into cache -->
+  <path d="M 362 166 L 362 192 L 205 192 L 205 238" stroke="#475569" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="230" y="188" font-size="11" fill="#64748b">z (detached), a, symlog(r)</text>
+
+  <!-- ============ MLP fallback / dynamics penalty ============ -->
+  <rect x="812" y="200" width="444" height="180" rx="10" fill="#fef9c3" stroke="#a16207" stroke-width="1.5"/>
+  <text x="828" y="224" font-size="14" font-weight="bold" fill="#854d0e">Stochastic penalty path (MLP reward / optional dynamics)</text>
+  <text x="828" y="248" font-size="13" fill="#0f172a">Hutchinson Frobenius:  E_v ‖∇²R·v‖²,  v ~ Rademacher (2 probes)</text>
+  <text x="828" y="272" font-size="13" fill="#0f172a">clamped Lap-2 trace:  max( (v₁ᵀHv₁)(v₂ᵀHv₂), 0 )</text>
+  <text x="828" y="292" font-size="11.5" fill="#64748b">non-negativity is the operative property (+41 vs −40 vs −79, report §3);</text>
+  <text x="828" y="308" font-size="11.5" fill="#64748b">fp32 under bf16 autocast; probe RNG checkpointed (bitwise resume)</text>
+  <text x="828" y="332" font-size="13" fill="#0f172a">total:  L = L_dyn + L_rew(MLP only) + λ(t)·penalty</text>
+  <text x="828" y="354" font-size="11.5" fill="#64748b">spectral path: penalty on R is EXACT inside the refit; only the optional</text>
+  <text x="828" y="370" font-size="11.5" fill="#64748b">dynamics term stays stochastic. Never penalize the policy Hessian (R16).</text>
+
+  <!-- ============ Behaviour ============ -->
+  <rect x="812" y="412" width="444" height="188" rx="10" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="828" y="436" font-size="14" font-weight="bold" fill="#0f172a">Behaviour learning — imagined rollouts (Dreamer-style)</text>
+  <text x="828" y="460" font-size="13" fill="#0f172a">r̂ = symexp( clamp( R([z, π(z)]), ±m·B ) )   (data-driven bound B)</text>
+  <text x="828" y="484" font-size="13" fill="#0f172a">z_{t+1} = dyn(z_t, π(z_t)),   t = 0 … H</text>
+  <text x="828" y="510" font-size="13.5" fill="#0f172a">G^λ_t = r̂_t + γ[ (1−λ_r)·V(z_{t+1}) + λ_r·G^λ_{t+1} ]</text>
+  <text x="828" y="532" font-size="12.5" fill="#0f172a">policy ↑ G^λ + entropy;  value ↓ ‖V − G^λ‖²  (return-normalized)</text>
+  <text x="828" y="556" font-size="12" fill="#64748b">adaptive horizon: H grows only as the penalty EMA certifies low curvature</text>
+  <text x="828" y="573" font-size="12" fill="#64748b">(H ≤ 25) — long horizons are PURCHASED by curvature control (R15)</text>
+
+  <line x1="780" y1="530" x2="808" y2="506" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="745" y="548" font-size="11" fill="#64748b">R(x), exact penalty</text>
+  <path d="M 1034 380 L 1034 408" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+  <path d="M 1256 506 L 1268 506 L 1268 60 L 119 60 L 119 76" stroke="#475569" stroke-width="1.2" stroke-dasharray="5 4" fill="none" marker-end="url(#arr)"/>
+  <text x="640" y="74" font-size="11" fill="#64748b">π acts in the environment</text>
+
+  <!-- ============ Bridge / experimental ============ -->
+  <rect x="24" y="632" width="1232" height="156" rx="10" fill="#fdf2f8" stroke="#9d174d" stroke-width="1.5" stroke-dasharray="7 4"/>
+  <text x="40" y="656" font-size="14" font-weight="bold" fill="#9d174d">Bridge experiments (supervised proxy; scripts/bridge_experiment.py) — wide cut + sharp transverse cut</text>
+  <text x="40" y="682" font-size="13" fill="#0f172a">Gram (sharp) cut:  mean_n (ΔR(x_n))² = cᵀG c,   G = DᵀD/N,   D = −(Φ ⊙ |w|²)   (PSD; exact pointwise curvature density)</text>
+  <text x="40" y="706" font-size="13" fill="#0f172a">hybrid penalty:  P = λ·[ α·diag(θ) + (1−α)·M·G ]   — scale-matched: E[M·G] = diag(|w|⁴)</text>
+  <text x="40" y="730" font-size="12.5" fill="#0f172a">run 1: positivity alone NOT SUPPORTED 0/9 (data-null directions). run 2: hybrid 7/9, benefit tracks Frobenius angle ∠(diag, G) ≈ 65–79°, ρ_Spearman = +0.63.</text>
+  <text x="40" y="752" font-size="12.5" fill="#0f172a">run 3: σ-ladder × λ-polynomial = +33.7% (10/10), + Gram = +36.8% — the INTERACTION carries it. Ported: spectral.sigma_w accepts a list; preset experiment/spectral_ladder.</text>
+  <text x="40" y="774" font-size="11.5" fill="#9d174d">conjecture tier — Weil-positivity identification untested here; supervised +33.7% is not yet an RL claim (validation arm pending).</text>
+
+  <!-- ============ Symbol key ============ -->
+  <text x="24" y="822" font-size="12" font-weight="bold" fill="#0f172a">Symbols</text>
+  <text x="24" y="842" font-size="11.5" fill="#475569">M = n_features (512) · K = ladder rungs · θ(t) = per-feature ridge weights · λ(t) = penalty schedule · symlog(r) = sign(r)·log(1+|r|) · symexp = inverse</text>
+  <text x="24" y="860" font-size="11.5" fill="#475569">Φ ∈ ℝ^{N×M} feature matrix · H = ∇²R in latent coords (z, a, τ) · γ = discount · λ_r = return mixing · ε = 10⁻⁸ ridge floor · τ = task one-hot (multitask)</text>
+  <text x="24" y="878" font-size="11.5" fill="#475569">Closed-form chain: σ ladder fixes the bands → θ(t) doses them through training → one linear solve per refit → exact penalty certifies the imagination horizon.</text>
+</svg>
