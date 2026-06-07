@@ -35,7 +35,7 @@ PRESETS = {
     # dashboard (and make_figures) renders one band per arm.
     "multitask_ablation": ("train_multitask.py", [
         ("multitask-reg",    []),
-        ("multitask-lam0",   ["penalty.schedule.lam0=0"]),
+        ("multitask-lam0",   ["penalty.schedule.lam0=0", "penalty.schedule.floor=0"]),
         ("multitask-notask", ["penalty.include_task=false"]),
     ]),
     # lambda-schedule ablation (validation item 8) on Pendulum
@@ -45,6 +45,10 @@ PRESETS = {
         ("sched-cosine",   ["penalty.schedule.kind=cosine"]),
         ("sched-constant", ["penalty.schedule.kind=constant"]),
         ("sched-sin2chirp", ["penalty.schedule.kind=sin2chirp"]),
+        # floor hypothesis: lambda -> exactly 0 should degrade late training
+        # if the user's MLP-collapse claim holds (vs sched-step, floor 1e-5)
+        ("sched-step-zero", ["penalty.schedule.kind=step",
+                             "penalty.schedule.floor=0"]),
         # the user's narrowed-down recipe: clamped decaying TRACE penalty
         ("sched-trace-chirp", ["penalty.schedule.kind=sin2chirp",
                                "penalty.form=laplacian_trace"]),
@@ -66,6 +70,7 @@ PRESETS |= {
     # apparatus regression test (must land near +98 +- 23).
     "colab_recipe":  ("train.py", [("recipe", _RECIPE)]),
     "colab_control": ("train.py", [("control", ["penalty.schedule.lam0=0",
+                                                "penalty.schedule.floor=0",
                                                 "smoothing.enabled=false",
                                                 "training.total_env_steps=200000"])]),
     # head-to-head for the report's sec.3 claim, same dose, only the estimator
@@ -73,6 +78,18 @@ PRESETS |= {
     "colab_estimator": ("train.py", [
         ("est-frobenius", _RECIPE),
         ("est-trace",     _RECIPE + ["penalty.form=laplacian_trace"]),
+    ]),
+    # champion vs challenger: run ONLY after the local schedule_ablation ranks
+    # profiles — promotes the local winner to one GPU head-to-head against the
+    # original step-anneal at matched dose. 2 arms, not a sweep.
+    "colab_schedule_final": ("train.py", [
+        ("sched-step-champ", _RECIPE),
+        ("sched-challenger", ["penalty.schedule.kind=sin2chirp",
+                              "penalty.schedule.lam0=0.5",
+                              "+penalty.schedule.period0=8000",
+                              "+penalty.schedule.period_end=1000",
+                              "+penalty.schedule.total_steps=40000",
+                              "training.total_env_steps=200000"]),
     ]),
 }
 

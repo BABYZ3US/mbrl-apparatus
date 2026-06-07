@@ -53,6 +53,19 @@ Multi-kernel Hessian constraints triangulate the latent representation via inter
 of Sobolev balls (holographic encoding at critical dimension d = 4); the variational
 principle is a biharmonic field theory with EL equation λ∇⁴R + (R − r) = 0.
 
+## The schedule hypothesis (user, 2026-06-06 — drives the schedule ablation)
+
+Stated form: high λ early produces a smooth, general mapping of the reward manifold
+(smooth early gradients); λ should then EASE over time so policy and reward can
+exploit the environment's real structure; and **λ must never be exactly zero or the
+MLPs collapse**. Decomposed into falsifiable parts, tested by `schedule_ablation`:
+
+- (a) smooth easing > abrupt release: cuberoot / sin2chirp / cosine vs step.
+  (Note (a) agrees with R12's theory profile; it CONTRADICTS the original §7 result
+  where step-to-zero won — adjudicate empirically.)
+- (b) floor > 0 matters: `sched-step` (floor 1e-5) vs `sched-step-zero` (exact 0).
+  Collapse prediction: step-zero degrades late training.
+
 ## The gap-closing experiment (now experiment 10, `scripts/transversality_test.py`)
 
 Repeat the supervised transversality test with **trained-policy data** (narrow state

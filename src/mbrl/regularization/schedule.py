@@ -27,20 +27,21 @@ class LambdaSchedule:
             assert self.total_steps, "step schedule needs total_steps"
             lam = self.lam0 * (self.step_factor if t >= self.step_at * self.total_steps else 1.0)
         elif self.kind == "sin2chirp":
-            # lam0 * envelope(t) * sin^2(phi(t)): strictly non-negative; the
-            # cuberoot envelope (R12) decays the amplitude while a linear chirp
-            # raises the oscillation frequency — slow clamp/release cycles early
+            # lam0 * envelope(t) * sin^2(phi(t)): strictly non-negative; a
+            # pow-free envelope decays the amplitude while a linear chirp raises
+            # the oscillation frequency — slow clamp/release cycles early
             # (stability), faster + smaller cycles late (models are better, the
             # reward gets periodic curvature 'breathing' instead of a constant
-            # squeeze). Instantaneous period sweeps period0 -> period_end over
-            # total_steps (constant period0 if total_steps unset).
-            env = (self.t0 / (self.t0 + t)) ** (1.0 / 3.0)
+            # squeeze). Envelope: linear ramp to the floor over total_steps
+            # (rational t0/(t0+t) fallback if total_steps unset — also pow-free).
             f0 = 1.0 / self.period0
             if self.total_steps:
-                f1 = 1.0 / self.period_end
                 frac = min(t / self.total_steps, 1.0)
+                env = 1.0 - frac
+                f1 = 1.0 / self.period_end
                 phase = 2 * math.pi * t * (f0 + 0.5 * (f1 - f0) * frac)
             else:
+                env = self.t0 / (self.t0 + t)
                 phase = 2 * math.pi * f0 * t
             lam = self.lam0 * env * math.sin(phase) ** 2
         elif self.kind == "cosine":

@@ -24,9 +24,9 @@ penalty:
   penalize_dynamics: false   # R+T optional (R8/R9); NEVER add policy (R10)
   schedule:             # R12
     kind: cuberoot      # cuberoot | step | cosine | constant | sin2chirp
-                        # sin2chirp: lam0*(t0/(t0+t))^(1/3)*sin^2(chirped phase) —
-                        # slow clamp/release cycles early, faster+smaller late;
-                        # needs total_steps for the chirp (else constant period0)
+                        # sin2chirp: lam0*(1-t/T)*sin^2(chirped phase) — pow-free
+                        # linear envelope; slow clamp/release cycles early,
+                        # faster+smaller late; needs total_steps (else t0/(t0+t))
     # period0: 20000    # sin2chirp: initial steps per oscillation
     # period_end: 2000  # sin2chirp: final steps per oscillation
     lam0: 1.0e-3        # NOTE: the original HalfCheetah recipe used lam=0.5

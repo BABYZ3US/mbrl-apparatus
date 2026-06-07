@@ -31,10 +31,10 @@ def test_sin2chirp_properties():
                        period0=20_000, period_end=2_000, total_steps=T)
     ts = np.arange(0, T, 10)
     vals = np.array([s(int(t)) for t in ts])
-    # strictly positive (floor) and bounded by the envelope
+    # strictly positive (floor) and bounded by the pow-free linear envelope
     assert (vals >= 1e-6 - 1e-12).all()
-    env = 1e-2 * (20_000 / (20_000 + ts)) ** (1 / 3)
-    assert (vals <= env + 1e-9).all()
+    env = np.maximum(1e-2 * (1 - ts / T), 0)
+    assert (vals <= env + 1e-6).all()
     # amplitude decays: max over early window > max over late window
     early = vals[ts < 20_000].max()
     late = vals[ts > 80_000].max()
@@ -48,7 +48,7 @@ def test_sin2chirp_properties():
 
 def test_sin2chirp_no_total_steps_constant_period():
     s = LambdaSchedule(kind="sin2chirp", lam0=1.0, t0=1e12, floor=0.0,
-                       period0=100)  # huge t0 => flat envelope
+                       period0=100)  # huge t0 => rational envelope ~ 1
     # sin^2 with period0=100: zero at t=0, max near t=25, zero near t=50
     assert s(0) == pytest.approx(0.0, abs=1e-9)
     assert s(25) == pytest.approx(1.0, rel=1e-3)
