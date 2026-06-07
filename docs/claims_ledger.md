@@ -183,6 +183,39 @@ dynamics-curvature floor the affine choice removed). spec-learned arm added to
 colab_spectral. Neither has supervised or RL evidence yet — conjecture tier
 until the arms run.
 
+**Bridge run 6 (2026-06-08, PRE-REGISTERED before results): the scattering
+(rational) head.** Motivated by the math project's HP-candidate-11 note (the
+Eisenstein scattering matrix is a RATIO whose pole structure carries the
+spectrum — established Pavlov–Faddeev/Lax–Phillips mathematics; the numerical
+"validation" there confirms a theorem, not a conjecture). Architecture
+question: R = N/D (RationalSpectralReward, SK closed-form iterations, matched
+M=512 and sweep budget vs the linear ladder+poly champion) on two target
+families — smooth (rich_reward) and resonant (3 bounded spikes placed ON the
+data manifold). Criteria fixed in scripts/scattering_head_test.py before any
+cell ran: (i) rational wins resonant majority (overall AND near-spike MSE);
+(ii) no tax on smooth; (iii) resonance-recovery contrast > 3 (the model's
+1/|D| peaks land on the true spike centers). FALSIFIER: (i) fails ⇒ NOT
+SUPPORTED regardless of (iii).
+
+**RESULTS (2026-06-08): NOT SUPPORTED.** Three versions, all recorded:
+v1 — SK collapsed to the degenerate attractor N≡0, D≡0 under target noise
+(95.7% D-clamp rate); v2 — den_anchor=1 fix kills the collapse (0.01% clamp)
+but crushes real resonances too; v3 — anchor swept on validation (rational
+sweep 2x the linear arm's, noted): resonant 2/10 overall, **0/10 near-spike**
+(0.491 vs 0.320), recovery contrast 1.2 (criterion >3), smooth 4/10 (no tax —
+criterion ii holds). The head itself is sound — it beats linear on a PLANTED
+strongly-rational target with pole recovery (unit test) — so the negative
+result is about the task class: BOUNDED on-manifold spikes (A·eps/(eps+d²),
+max 3) under sigma=1 noise are absorbed fine by the linear multi-scale frame;
+the rational form's capacity doesn't pay and its denominator is one more thing
+to estimate from noise. Possible follow-up (NEW pre-registration required, not
+a retry): near-unbounded spikes / discontinuous goal bonuses, where linear
+features provably ring. Structural echo for the parent project: a ratio's
+power lies in representing ACTUAL poles; where the ground truth is bounded,
+the scattering form is decoration — consistent with the HP-11 note's own
+caveat (the identification concerns analytic structure, not ratios being
+generically better approximators).
+
 **Spectral scheduling rule (user, 2026-06-07, from the first RL attempt):** never
 pair the spectral path with step anneals or zero-touching oscillations (sin2chirp
 nulls, step release). The closed-form refit has no inertia: the instant lambda ~ 0,

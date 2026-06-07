@@ -71,6 +71,94 @@ def poly_weights(omega_norms: Tensor, degrees, coefs) -> Tensor:
     return out
 
 
+class RationalSpectralReward:
+    """Scattering-form reward head (bridge run 6): R(x) = N(x) / D(x) with
+    N(x) = a · φ_N(x)  and  D(x) = 1 + b · φ_D(x), both RFF expansions.
+
+    Motivation (structural, from the math project's HP-candidate-11 note): the
+    Eisenstein scattering matrix is a RATIO of completed zetas whose pole
+    structure carries the spectrum. A purely linear feature model cannot
+    represent near-pole (resonance) structure at any reasonable feature count;
+    a rational one can. RL translation: sharp localized rewards (goal bonuses,
+    contact spikes) are resonances on the state manifold.
+
+    Fitting stays in the closed-form family: Sanathanan–Koerner iterations —
+    each pass solves the LINEARIZED weighted least squares
+        min Σ_n  [ (N(x_n) − y_n D(x_n))² / D_prev(x_n)² ]  + penalties
+    which is one (2M', 2M') ridge solve in (a, b) per iteration (design
+    [Φ_N, −diag(y) Φ_D], target y). 3–5 iterations suffice; no Adam.
+
+    Guard rail: D can cross zero off the fitted region. predict() clamps
+    |D| ≥ d_floor and exposes clamp_rate_ for honesty; near-zeros of D are
+    the model's RESONANCE MAP (1/|D| peaks), used by the run-6 recovery
+    diagnostic. This head is EXPERIMENTAL — supervised harness only until
+    run 6 adjudicates; not wired into the Trainer."""
+
+    def __init__(self, in_dim: int, n_features: int = 512,
+                 sigma_w="auto-ladder", seed: int = 0, d_floor: float = 0.05):
+        if sigma_w == "auto-ladder":
+            sigma_w = [0.25, 0.5, 1.0, 2.0]
+        half = n_features // 2
+        self.num = SpectralReward(in_dim, half, sigma_w, seed=seed * 2 + 1)
+        self.den = SpectralReward(in_dim, half, sigma_w, seed=seed * 2 + 2)
+        self.in_dim, self.M = in_dim, n_features
+        self.d_floor = float(d_floor)
+        self.a = torch.zeros(half)
+        self.b = torch.zeros(half)
+        self.clamp_rate_ = 0.0
+
+    def _den_raw(self, X: Tensor) -> Tensor:
+        return 1.0 + self.den.features(X) @ self.b
+
+    def predict(self, X: Tensor) -> Tensor:
+        N = self.num.features(X) @ self.a
+        D = self._den_raw(X)
+        Dc = torch.where(D.abs() < self.d_floor,
+                         self.d_floor * torch.sign(D) + (D == 0) * self.d_floor,
+                         D)
+        self.clamp_rate_ = float((D.abs() < self.d_floor).float().mean())
+        return N / Dc
+
+    __call__ = predict
+
+    def fit(self, X: Tensor, y: Tensor, weights_num: Tensor,
+            weights_den: Tensor, iters: int = 4,
+            den_anchor: float = 1.0) -> "RationalSpectralReward":
+        """SK iterations; weights_* are per-feature ridge weights (use the
+        validated poly band weights for both blocks).
+
+        den_anchor (run-6 v2 fix): SK has a degenerate attractor under target
+        noise — N == 0, D == 0 zeroes the linearized objective (observed:
+        95.7% D-clamp rate, run 6 v1). The anchor adds
+        den_anchor * Σ_n w_n (D(x_n) - 1)^2, i.e. deviation of D from 1 in
+        DATA space costs like fit error; resonances must now earn their D-dips
+        against that price. Same failure family as run 4's leakage-broken
+        estimator: an optimizer pathology, fixed and recorded, not hidden."""
+        y = torch.as_tensor(y, dtype=torch.float32)
+        with torch.no_grad():
+            Pn = self.num.features(X)                 # (N, M')
+            Pd = self.den.features(X)
+            design = torch.cat([Pn, -y.unsqueeze(-1) * Pd], dim=1)  # (N, 2M')
+            theta = torch.cat([weights_num, weights_den])
+            half = Pn.shape[1]
+            Dprev = torch.ones_like(y)
+            for _ in range(iters):
+                w = 1.0 / Dprev.pow(2).clamp_min(self.d_floor ** 2)
+                A = design.T @ (w.unsqueeze(-1) * design) + torch.diag(theta + 1e-8)
+                rhs = design.T @ (w * y)
+                if den_anchor > 0:   # b-block Gram: (D - 1) = Phi_d b
+                    A[half:, half:] += den_anchor * (Pd.T @ (w.unsqueeze(-1) * Pd))
+                ab = torch.linalg.solve(A, rhs)
+                self.a, self.b = ab[:half], ab[half:]
+                Dprev = (1.0 + Pd @ self.b)
+        return self
+
+    def resonance_score(self, X: Tensor) -> Tensor:
+        """1/|D(x)| (unclamped): peaks = the model's learned resonances."""
+        with torch.no_grad():
+            return 1.0 / self._den_raw(X).abs().clamp_min(1e-6)
+
+
 def snr_band_weights(Phi: Tensor, y: Tensor, omega_norms: Tensor,
                      n_bands: int = 8, snr_clip: tuple = (1e-3, 1e3),
                      generator: "torch.Generator | None" = None):

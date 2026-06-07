@@ -152,3 +152,34 @@ def test_snr_band_weights_wiener_behavior():
     mse_snr = torch.mean((fit_snr.predict(Xte) - yte) ** 2).item()
     mse_raw = torch.mean((fit_raw.predict(Xte) - yte) ** 2).item()
     assert mse_snr < mse_raw
+
+
+def test_rational_head_recovers_planted_rational():
+    """SK iterations: a planted N/D target is fit better by the rational head
+    than by a linear head at MATCHED total features; D-guard exposes clamping."""
+    from mbrl.models.spectral import RationalSpectralReward
+
+    g = torch.Generator().manual_seed(0)
+    d = 3
+    X = torch.randn(3000, d, generator=g)
+    c0 = torch.tensor([0.6, -0.4, 0.2])
+    y = torch.sin(X[:, 0]) / (0.3 + (X - c0).pow(2).sum(-1))   # one resonance
+    Xte = torch.randn(1500, d, generator=g)
+    yte = torch.sin(Xte[:, 0]) / (0.3 + (Xte - c0).pow(2).sum(-1))
+
+    rr = RationalSpectralReward(d, 128, [0.5, 1.0], seed=0)
+    wn = 1e-3 * rr.num.w4
+    wd = 1e-3 * rr.den.w4
+    rr.fit(X, y, weights_num=wn, weights_den=wd, den_anchor=0.05)
+    mse_rat = torch.mean((rr.predict(Xte) - yte) ** 2).item()
+
+    sr = SpectralReward(d, 128, [0.5, 1.0], seed=0).fit(X, y, lam=1e-3)
+    mse_lin = torch.mean((sr.predict(Xte) - yte) ** 2).item()
+
+    assert torch.isfinite(rr.predict(Xte)).all()
+    assert rr.clamp_rate_ < 0.2          # guard rail mostly inactive
+    assert mse_rat < mse_lin             # rational wins on a rational target
+    # resonance recovery: 1/|D| larger at the planted center than randomly
+    score_c = rr.resonance_score(c0.unsqueeze(0)).item()
+    score_r = rr.resonance_score(Xte[:256]).mean().item()
+    assert score_c > score_r
