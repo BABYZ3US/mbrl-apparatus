@@ -6,7 +6,7 @@ The headline number is the zero-shot generalization gap on INTERPOLATION
 (smoothness only promises interpolation); extrapolation reported alongside.
 """
 from __future__ import annotations
-import json, glob, statistics as st
+import json, statistics as st
 from pathlib import Path
 
 RUNS = Path("results/runs")

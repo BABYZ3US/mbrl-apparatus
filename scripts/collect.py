@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 def worker(worker_id: int, args) -> str:
     import gymnasium as gym
-    import numpy as np
     import torch
     from mbrl.training.buffer import ReplayBuffer
 
@@ -29,7 +28,6 @@ def worker(worker_id: int, args) -> str:
 
     policy = None
     if args.run_path:  # pull latest policy; else random collection
-        from mbrl.utils.checkpoint import CheckpointManager
         import wandb
         api = wandb.Api()
         art = api.artifact(f"{args.run_path}:latest", type="checkpoint")

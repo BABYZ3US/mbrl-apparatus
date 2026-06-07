@@ -6,7 +6,6 @@ Render before/after regularization side by side.
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 
 

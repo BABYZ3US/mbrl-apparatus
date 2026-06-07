@@ -17,6 +17,11 @@ Local CPU; joblib-parallel.   python scripts/transversality_test.py --jobs 8
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotation-only; heavy imports stay function-local
+    import torch
+
 import argparse
 import itertools
 import json
