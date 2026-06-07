@@ -202,7 +202,8 @@ class SpectralReward:
 
     def __init__(self, in_dim: int, n_features: int = 512,
                  sigma_w: "float | list[float]" = 1.0,
-                 seed: int = 0, device: str = "cpu"):
+                 seed: int = 0, device: str = "cpu",
+                 learn_scales: bool = False):
         """sigma_w: scalar bandwidth, or a list = SIGMA LADDER (sigma
         parameterized over the transform): feature block k (M/K features)
         is drawn at bandwidth sigma_w[k], giving a multi-scale frame with
@@ -230,6 +231,23 @@ class SpectralReward:
                 W[k * blk: n_features if k == K - 1 else (k + 1) * blk] *= sig
         self.W = W.to(self.device)
         self.b = (2.0 * math.pi * torch.rand(n_features, generator=g)).to(self.device)
+        # learn_scales (user, 2026-06-08): no manual clamp/calibration — the
+        # ladder values become INITIAL scales and per-block log-scales are
+        # trained by gradient through the cos features on the reward fit
+        # error ("gradients flow through the scaled pipes"). The closed-form
+        # solve re-anchors c on the moved basis at each refit.
+        self.learn_scales = bool(learn_scales)
+        if self.learn_scales:
+            sigmas = list(sigma_w) if not isinstance(sigma_w, (int, float)) \
+                else [float(sigma_w)]
+            K = len(sigmas)
+            blk = n_features // K
+            bid = torch.zeros(n_features, dtype=torch.long)
+            for kk in range(K):
+                bid[kk * blk: n_features if kk == K - 1 else (kk + 1) * blk] = kk
+            self.block_id = bid.to(self.device)
+            self.W_base = self.W            # ladder already applied = init scales
+            self.log_s = torch.zeros(K, device=self.device, requires_grad=True)
         self.c = torch.zeros(n_features, device=self.device)
         # |w_j|^2 and |w_j|^4 — diagonal curvature weights (precomputed once)
         self.w2 = self.W.pow(2).sum(-1)
@@ -237,11 +255,20 @@ class SpectralReward:
         self.lam = None  # last fit's lam (for reporting)
 
     # ---------------- features / prediction ----------------
+    def current_W(self) -> Tensor:
+        """Effective frequency matrix. learn_scales: W_base scaled per block by
+        exp(log_s) — differentiable in log_s, so reward-fit gradients reach
+        the bandwidths. Otherwise the fixed W."""
+        if self.learn_scales:
+            return self.W_base * torch.exp(self.log_s)[self.block_id].unsqueeze(-1)
+        return self.W
+
     def features(self, X: Tensor) -> Tensor:
         """(N, M) random Fourier features sqrt(2/M) cos(W x + b). Pure torch and
-        differentiable in X — predict() can be handed to hvp_penalty directly."""
+        differentiable in X (and in log_s when learn_scales) — predict() can be
+        handed to hvp_penalty directly."""
         X = torch.as_tensor(X, dtype=torch.float32, device=self.device)
-        return math.sqrt(2.0 / self.M) * torch.cos(X @ self.W.T + self.b)
+        return math.sqrt(2.0 / self.M) * torch.cos(X @ self.current_W().T + self.b)
 
     def predict(self, X: Tensor) -> Tensor:
         """(N,) predictions Phi(X) c. Differentiable w.r.t. X (no detach)."""
@@ -260,14 +287,21 @@ class SpectralReward:
         well-conditioned when weights ~ 0 (some |w_j| can be tiny, and
         Phi^T Phi is rank <= N for N < M)."""
         y = torch.as_tensor(y, dtype=torch.float32, device=self.device)
-        Phi = self.features(X)                                   # (N, M)
-        if weights is None:
-            if lam is None:
-                raise ValueError("fit() needs lam or an explicit weights vector")
-            weights = lam * self.w4
-        weights = torch.as_tensor(weights, dtype=torch.float32, device=self.device)
-        A = Phi.T @ Phi + torch.diag(weights + 1e-8)
-        self.c = torch.linalg.solve(A, Phi.T @ y)
+        with torch.no_grad():   # closed-form solve: no graph through the fit
+            if self.learn_scales:
+                # snapshot the moved basis: w2/w4 (penalty weights, exact
+                # penalty) and W (checkpointing, SNR utils) track the pipes
+                self.W = self.current_W().detach()
+                self.w2 = self.W.pow(2).sum(-1)
+                self.w4 = self.w2.pow(2)
+            Phi = self.features(X)                               # (N, M)
+            if weights is None:
+                if lam is None:
+                    raise ValueError("fit() needs lam or an explicit weights vector")
+                weights = lam * self.w4
+            weights = torch.as_tensor(weights, dtype=torch.float32, device=self.device)
+            A = Phi.T @ Phi + torch.diag(weights + 1e-8)
+            self.c = torch.linalg.solve(A, Phi.T @ y)
         self.lam = float(lam) if lam is not None else None
         return self
 

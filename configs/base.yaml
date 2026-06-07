@@ -9,6 +9,11 @@ experiment:
   name: dev
 
 model:
+  dynamics: affine      # affine (deterministic) | gaussian (state probability
+                        # transitions p(z'|z,a) = N(mu, diag(sigma^2)); mean
+                        # stays affine in action so R15's zero action-curvature
+                        # is preserved; variance head is state-only; imagination
+                        # rolls out rsamples with gradient flow)
   latent_dim: 4         # capped at 4x obs_dim (user rule v2: wider latent ->
                         # more null nodes / longer tails; e.g. 12 on Pendulum)
   hidden: 256
@@ -72,6 +77,14 @@ spectral:               # closed-form RFF spectral reward (models/spectral.py)
   cal_mults: [0.5, 1.0, 2.0, 4.0]  # sigma_w=auto rung placement (cal_low won
                         # the supervised head-to-head: +48.3% vs +38.8% for
                         # the higher placement)
+                        # OR "learned" = NO manual placement at all: per-block
+                        # log-scales trained by gradient on the reward fit
+                        # error through the cos features ("gradients flow
+                        # through the scaled pipes"); the closed-form c
+                        # re-anchors on the moved basis at each refit. Logged
+                        # as spectral/sigma_scale_k.
+  init_ladder: [0.25, 0.5, 1.0, 2.0]  # sigma_w=learned initial scales
+  sigma_lr: 1.0e-3      # sigma_w=learned: Adam lr on the per-block log-scales
   refit_every: 200      # model updates between closed-form refits
   cache_size: 4096      # rolling (x, symlog-target) cache feeding the refit
   heads: 3              # independent frequency draws = cheap exact ensemble

@@ -154,6 +154,11 @@ PRESETS |= {
         # first refit) — the supervised champion (+48.3%); spec-ladder is its
         # fixed-ladder control
         ("spec-auto",   _SPEC + ["+experiment=spectral_auto"]),
+        # learned scales (user, 2026-06-08): no manual placement — per-block
+        # log-sigmas trained by reward-fit gradient through the cos features;
+        # logged as spectral/sigma_scale_k
+        ("spec-learned", _SPEC + _SPEC_GUARD + [
+            "spectral.enabled=true", "spectral.sigma_w=learned"]),
     ]),
 }
 

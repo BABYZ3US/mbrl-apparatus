@@ -16,7 +16,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ..models import Encoder, EMAEncoder, AffineDynamics, RewardModel, Policy, ValueFn
+from ..models import (Encoder, EMAEncoder, AffineDynamics,
+                      GaussianAffineDynamics, RewardModel, Policy, ValueFn)
 from ..models.reward import symlog, symexp
 from ..models.spectral import SpectralReward, poly_weights, snr_band_weights
 from ..regularization.hutchinson import hvp_penalty, laplacian_trace_penalty
@@ -39,7 +40,14 @@ class Trainer:
         h, d = cfg.model.hidden, cfg.model.depth
         self.encoder = Encoder(obs_dim, k, h, d).to(device)
         self.ema = EMAEncoder(self.encoder, cfg.model.ema_decay)
-        self.dynamics = AffineDynamics(k, action_dim, h, d).to(device)
+        # dynamics: "affine" (deterministic) or "gaussian" (state probability
+        # transitions, user 2026-06-08 — mean stays affine in action so the
+        # R15 zero-action-curvature property is preserved; variance is
+        # state-only). forward() of the gaussian model is an rsample, so
+        # imagination becomes a stochastic rollout with gradient flow.
+        self.dyn_stochastic = str(cfg.model.get("dynamics", "affine")) == "gaussian"
+        dyn_cls = GaussianAffineDynamics if self.dyn_stochastic else AffineDynamics
+        self.dynamics = dyn_cls(k, action_dim, h, d).to(device)
         self.symlog = bool(cfg.model.get("symlog_reward", False))
         self.reward = RewardModel(k, action_dim, h, d, task_dim=task_dim,
                                   n_heads=int(cfg.model.get("reward_heads", 1))).to(device)
@@ -122,7 +130,20 @@ class Trainer:
             self.spec_nf = int(sp.get("n_features", 512))
             self.spec_nheads = int(sp.get("heads", 3))
             sw = sp.get("sigma_w", 1.0)
-            if isinstance(sw, str) and sw == "auto":
+            if isinstance(sw, str) and sw == "learned":
+                # LEARNED scales (user, 2026-06-08): no manual clamp — init at
+                # the ladder, then per-block log-scales train by gradient on
+                # the reward fit error through the cos features ("gradients
+                # flow through the scaled pipes"). c re-anchors each refit.
+                init = [float(s) for s in sp.get("init_ladder",
+                                                 [0.25, 0.5, 1.0, 2.0])]
+                self.spec_sigma = "learned"
+                self.spec_sigma_star = None
+                self.spec_heads = self._build_spec_heads(init, learn=True)
+                self.spec_sigma_opt = torch.optim.Adam(
+                    [h.log_s for h in self.spec_heads],
+                    lr=float(sp.get("sigma_lr", 1e-3)))
+            elif isinstance(sw, str) and sw == "auto":
                 # SNR-CALIBRATED ladder (bridge run 5): heads are built lazily
                 # at the first refit — calibrate_sigma_ladder measures the
                 # SNR=1 crossing sigma* on the cache and places rungs at
@@ -157,7 +178,7 @@ class Trainer:
             self.spec_snr_gen = torch.Generator().manual_seed(int(cfg.seed) + 777)
 
     # ---------------- spectral reward (closed-form RFF ridge ensemble) ----------------
-    def _build_spec_heads(self, sigma_w):
+    def _build_spec_heads(self, sigma_w, learn: bool = False):
         spec_in = self.spec_cache_x.shape[1] if hasattr(self, "spec_cache_x") \
             and self.spec_cache_x.ndim == 2 else None
         # at __init__ time the cache doesn't exist yet; derive from encoder
@@ -165,7 +186,7 @@ class Trainer:
             spec_in = self.encoder.latent_dim + self.dynamics.m + self.task_dim
         return [SpectralReward(spec_in, n_features=self.spec_nf, sigma_w=sigma_w,
                                seed=int(self.cfg.seed) * 1000 + i,
-                               device=str(self.device))
+                               device=str(self.device), learn_scales=learn)
                 for i in range(self.spec_nheads)]
     def _spectral_band_weights(self, head, t: int) -> torch.Tensor:
         """Per-feature ridge weights at model-update time t:
@@ -229,7 +250,10 @@ class Trainer:
         with torch.no_grad():
             z_next_tgt = self.ema(obs_next)
 
-        dyn_loss = F.mse_loss(self.dynamics(z, a), z_next_tgt)
+        if self.dyn_stochastic:   # Gaussian NLL on the transition distribution
+            dyn_loss = self.dynamics.nll(z, a, z_next_tgt)
+        else:
+            dyn_loss = F.mse_loss(self.dynamics(z, a), z_next_tgt)
         # reward model predicts symlog(r) when model.symlog_reward is on;
         # imagination applies symexp to whatever it consumes (behaviour_update)
         r_target = symlog(r) if self.symlog else r
@@ -265,12 +289,28 @@ class Trainer:
                     rew_loss_val = F.mse_loss(pred, r_target).item()
                 else:   # sigma_w=auto, pre-calibration: heads not built yet
                     rew_loss_val = float(r_target.pow(2).mean().item())
+            if self.spec_sigma == "learned" and self.spec_refits > 0:
+                # one gradient step on the bandwidths: fit error of the
+                # CURRENT batch, c held fixed (re-anchored at next refit).
+                # x_spec is built from detached (z, a) — only log_s moves.
+                pred = torch.stack([h.predict(x_spec)
+                                    for h in self.spec_heads]).mean(0)
+                sig_loss = F.mse_loss(pred, r_target.detach())
+                self.spec_sigma_opt.zero_grad(set_to_none=True)
+                sig_loss.backward()
+                self.spec_sigma_opt.step()
             rew_loss = None
             spec_metrics = {"spectral/refits": self.spec_refits,
                             "spectral/cache_n": self.spec_cache_x.shape[0],
                             "spectral/fitted": float(self.spec_refits > 0)}
             if self.spec_sigma_star is not None:
                 spec_metrics["spectral/sigma_star"] = self.spec_sigma_star
+            if self.spec_sigma == "learned" and self.spec_heads:
+                with torch.no_grad():   # effective per-block sigmas, head 0
+                    h0 = self.spec_heads[0]
+                    eff = torch.exp(h0.log_s)
+                    for kk in range(len(eff)):
+                        spec_metrics[f"spectral/sigma_scale_{kk}"] = float(eff[kk])
             if self.spec_weights_mode == "snr" and self.spec_snr_info:
                 inf = self.spec_snr_info
                 if inf.get("band_snrs"):
@@ -319,7 +359,8 @@ class Trainer:
                              generator=self.gen)
         if self.cfg.penalty.penalize_dynamics:  # optional transversal term (R8/R9)
             k = z.shape[-1]
-            fn_t = lambda x: self.dynamics(x[..., :k], x[..., k:k + a.shape[-1]]).sum(-1)
+            dyn_det = self.dynamics.mean if self.dyn_stochastic else self.dynamics
+            fn_t = lambda x: dyn_det(x[..., :k], x[..., k:k + a.shape[-1]]).sum(-1)
             za = torch.cat([z.detach(), a], dim=-1)
             pen = pen + penalty_fn(fn_t, za, n_probes=self.cfg.penalty.n_probes,
                                    generator=self.gen)
@@ -521,12 +562,17 @@ class Trainer:
             # counters — everything needed for bitwise resume of the closed-
             # form path (W/b are seed-derived but saved anyway: cheap insurance)
             sd["spectral"] = {
-                "heads": [{"W": h.W.cpu(), "b": h.b.cpu(), "c": h.c.cpu()}
+                "heads": [{"W": h.W.cpu(), "b": h.b.cpu(), "c": h.c.cpu(),
+                           **({"W_base": h.W_base.cpu(),
+                               "log_s": h.log_s.detach().cpu()}
+                              if h.learn_scales else {})}
                           for h in self.spec_heads],
                 "cache_x": self.spec_cache_x, "cache_y": self.spec_cache_y,
                 "since_refit": self.spec_since_refit, "refits": self.spec_refits}
             sd["spec_sigma"] = self.spec_sigma          # auto: calibrated ladder
             sd["spec_sigma_star"] = self.spec_sigma_star
+            if self.spec_sigma == "learned":
+                sd["spec_sigma_opt"] = self.spec_sigma_opt.state_dict()
         return sd
 
     def load_state_dict(self, sd):
@@ -567,6 +613,12 @@ class Trainer:
                 head.c = hs["c"].to(head.device)
                 head.w2 = head.W.pow(2).sum(-1)
                 head.w4 = head.w2.pow(2)
+                if head.learn_scales and "log_s" in hs:
+                    head.W_base = hs["W_base"].to(head.device)
+                    with torch.no_grad():
+                        head.log_s.copy_(hs["log_s"].to(head.device))
+            if self.spec_sigma == "learned" and "spec_sigma_opt" in sd:
+                self.spec_sigma_opt.load_state_dict(sd["spec_sigma_opt"])
             self.spec_cache_x = sp["cache_x"].clone()
             self.spec_cache_y = sp["cache_y"].clone()
             self.spec_since_refit = sp["since_refit"]

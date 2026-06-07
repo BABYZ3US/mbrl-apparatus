@@ -156,6 +156,23 @@ calibrated basis exactly — covered by tests). Preset arm: spec-auto in
 colab_spectral (`+experiment=spectral_auto`); spec-ladder is its fixed-ladder
 control. RL validation pending, same criterion as run 3's.
 
+**Learned bandwidths + probabilistic dynamics (user, 2026-06-08 — both
+implemented, both untested).** (a) `spectral.sigma_w: learned` — no manual
+placement or clamp: per-block log-scales trained by gradient on the reward fit
+error through the cos features ("gradients flow through the scaled pipes");
+closed-form c re-anchors on the moved basis each refit; scales logged as
+spectral/sigma_scale_k, checkpointed with optimizer state. Risk to watch: the
+gradient may drive scales toward overfit-friendly high bandwidths between
+refits — same failure family as the schedule rule above; the smooth floored
+schedule still applies to the poly weights. (b) `model.dynamics: gaussian` —
+state probability transitions p(z'|z,a) = N(mu, diag sigma^2(z)), NLL-trained,
+imagination rolls out rsamples. DESIGN GUARD: the mean stays affine in action
+and the variance head is state-only, so R15's d^2/da^2 = 0 is preserved; a
+full-MLP mean was deliberately not offered (it would reintroduce the
+dynamics-curvature floor the affine choice removed). spec-learned arm added to
+colab_spectral. Neither has supervised or RL evidence yet — conjecture tier
+until the arms run.
+
 **Spectral scheduling rule (user, 2026-06-07, from the first RL attempt):** never
 pair the spectral path with step anneals or zero-touching oscillations (sin2chirp
 nulls, step release). The closed-form refit has no inertia: the instant lambda ~ 0,

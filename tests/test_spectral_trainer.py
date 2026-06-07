@@ -228,3 +228,52 @@ def test_sigma_auto_calibrates_and_resumes():
     for h1, h2 in zip(t.spec_heads, t2.spec_heads):
         assert torch.equal(h1.W, h2.W) and torch.equal(h1.c, h2.c)
     assert t2.spec_sigma_star == t.spec_sigma_star
+
+
+def test_learned_sigma_scales_move_and_resume():
+    """sigma_w='learned': per-block log-scales get gradient steps from the
+    reward fit error after the first refit, metrics expose them, and the
+    save/load roundtrip restores scales + basis exactly."""
+    torch.manual_seed(0)
+    cfg = make_cfg(sigma_w="learned", n_features=64,
+                   init_ladder=[0.25, 0.5, 1.0, 2.0], sigma_lr=1e-2)
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    s0 = t.spec_heads[0].log_s.detach().clone()
+    last = {}
+    for i in range(10):
+        last = t.model_update(fake_batch(seed=500 + i))
+        assert np.isfinite(last["loss/total"])
+    assert t.spec_refits >= 1
+    assert not torch.allclose(t.spec_heads[0].log_s.detach(), s0)  # pipes moved
+    assert "spectral/sigma_scale_0" in last
+
+    sd = t.state_dict()
+    t2 = Trainer(make_cfg(sigma_w="learned", n_features=64,
+                          init_ladder=[0.25, 0.5, 1.0, 2.0], sigma_lr=1e-2),
+                 obs_dim=3, action_dim=1)
+    t2.load_state_dict(sd)
+    assert torch.allclose(t2.spec_heads[0].log_s.detach(),
+                          t.spec_heads[0].log_s.detach())
+    assert torch.equal(t2.spec_heads[0].W_base, t.spec_heads[0].W_base)
+
+
+def test_gaussian_dynamics_trainer_smoke():
+    """model.dynamics=gaussian: NLL trains, imagination rolls out stochastic
+    rsamples, everything finite; mean path stays affine in action."""
+    torch.manual_seed(0)
+    cfg = make_cfg()
+    cfg.model.dynamics = "gaussian"
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    from mbrl.models import GaussianAffineDynamics
+    assert isinstance(t.dynamics, GaussianAffineDynamics)
+    for i in range(8):
+        m = t.model_update(fake_batch(seed=600 + i))
+        assert np.isfinite(m["loss/dyn"])
+    # stochastic forward: two rollout steps from the same (z, a) differ
+    z = torch.randn(5, t.encoder.latent_dim)
+    a = torch.randn(5, 1)
+    assert not torch.equal(t.dynamics(z, a), t.dynamics(z, a))
+    # mean is deterministic and affine path is intact
+    assert torch.equal(t.dynamics.mean(z, a), t.dynamics.mean(z, a))
+    b = t.behaviour_update(torch.randn(16, t.encoder.latent_dim))
+    assert np.isfinite(b["loss/policy"])
