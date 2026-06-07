@@ -1,0 +1,278 @@
+"""Tests for the seven upgrades: vectorized collection (autoreset masking),
+auto-dosed lambda, symlog reward, reward ensemble + pessimism, latent
+LayerNorm, and the curvature-certified adaptive horizon.
+
+No MuJoCo, no wandb: Pendulum (classic-control) only; video logging is
+exercised nowhere here (it is try/except-guarded in scripts/train.py).
+"""
+import math
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+import numpy as np
+import pytest
+import torch
+import torch.nn.functional as F
+from omegaconf import OmegaConf
+from torch import nn
+
+from mbrl.models import Encoder, EMAEncoder, RewardModel
+from mbrl.models.reward import symlog, symexp
+from mbrl.training import Trainer, ReplayBuffer, collect_vectorized
+from mbrl.utils.checkpoint import CheckpointManager
+
+
+def make_cfg(**over):
+    base = {
+        "seed": 0,
+        "model": {"latent_dim": 4, "hidden": 32, "depth": 1, "ema_decay": 0.99},
+        "penalty": {"n_probes": 2, "penalize_dynamics": False,
+                    "schedule": {"kind": "cuberoot", "lam0": 1e-3, "t0": 100,
+                                 "floor": 0.0}},
+        "smoothing": {"enabled": True, "sigma": 1.5},
+        "imagination": {"horizon": 5, "gamma": 0.99},
+        "optim": {"model_lr": 3e-4, "policy_lr": 1e-4, "value_lr": 3e-4},
+    }
+    return OmegaConf.merge(OmegaConf.create(base), OmegaConf.create(over))
+
+
+def fake_batch(n=32, obs_dim=3, act_dim=1, seed=123, r_scale=1.0):
+    g = torch.Generator().manual_seed(seed)
+    return (torch.randn(n, obs_dim, generator=g), torch.randn(n, act_dim, generator=g),
+            r_scale * torch.randn(n, generator=g), torch.randn(n, obs_dim, generator=g))
+
+
+# ---------------- symlog ----------------
+def test_symlog_roundtrip_and_shape():
+    x = torch.linspace(-1e4, 1e4, 1001)
+    assert torch.allclose(symexp(symlog(x)), x, rtol=1e-4, atol=1e-4)
+    assert symlog(torch.tensor(0.0)).item() == 0.0
+    # compressive: |symlog| grows logarithmically
+    assert symlog(torch.tensor(1e6)).item() < 15.0
+    # odd function
+    assert torch.allclose(symlog(-x), -symlog(x))
+
+
+def test_reward_model_trains_in_symlog_space():
+    cfg = make_cfg(model={"symlog_reward": True})
+    torch.manual_seed(0)
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    obs, a, r, obs_next = fake_batch(n=64, r_scale=1000.0)  # raw vs symlog differ hugely
+    with torch.no_grad():
+        expected_symlog = F.mse_loss(t.reward(t.encoder(obs), a), symlog(r)).item()
+        expected_raw = F.mse_loss(t.reward(t.encoder(obs), a), r).item()
+    m = t.model_update((obs, a, r, obs_next))
+    assert m["loss/reward"] == pytest.approx(expected_symlog, rel=1e-5)
+    assert m["loss/reward"] < 0.01 * expected_raw  # definitely not the raw-space loss
+    # imagination consumes symexp of the model output
+    g = torch.Generator().manual_seed(7)
+    z = torch.randn(16, t.encoder.latent_dim, generator=g)
+    a2 = torch.randn(16, 1, generator=g)
+    with torch.no_grad():
+        r_im, _ = t._imagined_reward(z, a2)
+        assert torch.allclose(r_im, symexp(t.reward(z, a2)), atol=1e-6)
+
+
+# ---------------- reward ensemble + pessimism ----------------
+def test_reward_ensemble_shapes_and_disagreement():
+    torch.manual_seed(0)
+    rm = RewardModel(4, 2, hidden=32, depth=1, n_heads=3)
+    z, a = torch.randn(16, 4), torch.randn(16, 2)
+    heads = rm.all_heads(z, a)
+    assert heads.shape == (3, 16)
+    assert rm(z, a).shape == (16,)
+    assert torch.allclose(rm(z, a), heads.mean(0), atol=1e-6)  # forward = head mean
+    assert heads.std(0).mean().item() > 0  # independent head inits disagree
+    # on_concat (penalty target) is also the head mean, in raw model space
+    x = torch.cat([z, a], dim=-1)
+    assert torch.allclose(rm.on_concat(x), heads.mean(0), atol=1e-6)
+    # task-conditioned path keeps working
+    rm_t = RewardModel(4, 2, hidden=32, depth=1, task_dim=1, n_heads=3)
+    tau = torch.rand(16, 1)
+    assert rm_t.all_heads(z, a, tau).shape == (3, 16)
+    assert rm_t(z, a, tau).shape == (16,)
+
+
+def test_pessimism_reduces_imagined_reward():
+    cfg = make_cfg(model={"reward_heads": 3, "symlog_reward": True},
+                   imagination={"pessimism": 0.5})
+    torch.manual_seed(0)
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    g = torch.Generator().manual_seed(0)
+    z = torch.randn(64, t.encoder.latent_dim, generator=g)
+    a = torch.randn(64, 1, generator=g)
+    with torch.no_grad():
+        heads = symexp(t.reward.all_heads(z, a))
+        mean = heads.mean(0)
+        r_used, dis = t._imagined_reward(z, a)
+    assert dis.item() > 0
+    assert (r_used <= mean + 1e-7).all()           # pessimism never adds reward
+    assert (mean - r_used).max().item() > 0        # ...and strictly subtracts somewhere
+    assert torch.allclose(r_used, mean - 0.5 * heads.std(0), atol=1e-6)
+    # behaviour_update logs positive disagreement
+    b = t.behaviour_update(torch.randn(32, t.encoder.latent_dim, generator=g))
+    assert b["model/reward_disagreement"] > 0
+    assert math.isfinite(b["loss/policy"])
+
+
+# ---------------- adaptive horizon ----------------
+def test_adaptive_horizon_tracks_pen_ema_and_is_checkpointed(tmp_path):
+    cfg = make_cfg(imagination={"adaptive_horizon": {
+        "enabled": True, "h_min": 5, "h_max": 25, "decay": 0.99}})
+    torch.manual_seed(0)
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    g = torch.Generator().manual_seed(0)
+    z0 = torch.randn(32, t.encoder.latent_dim, generator=g)
+
+    t.pen_ema, t.pen_peak = 1.0, 1.0      # curvature at its peak -> shortest
+    assert t.behaviour_update(z0)["imagine/horizon"] == 5
+    t.pen_ema = 0.5                        # halfway down -> mid horizon
+    h_mid = t.behaviour_update(z0)["imagine/horizon"]
+    assert 5 < h_mid < 25
+    t.pen_ema = 0.0                        # certified smooth -> longest
+    assert t.behaviour_update(z0)["imagine/horizon"] == 25
+
+    # model_update maintains the EMA and the running peak
+    t.pen_ema, t.pen_peak = None, 0.0
+    t.model_update(fake_batch())
+    assert t.pen_ema is not None and t.pen_peak >= t.pen_ema > 0
+
+    # pen_ema / pen_peak survive a checkpoint round-trip
+    cm = CheckpointManager(tmp_path, OmegaConf.to_container(cfg), every=10)
+    cm.save(t, env_steps=1, tag=f"step{t.step}")  # resume() finds ckpt_step<N>.pt
+    t2 = Trainer(cfg, obs_dim=3, action_dim=1)
+    assert cm.resume(t2) == 1
+    assert t2.pen_ema == t.pen_ema and t2.pen_peak == t.pen_peak
+
+
+def test_adaptive_horizon_disabled_uses_cfg_horizon():
+    t = Trainer(make_cfg(), obs_dim=3, action_dim=1)
+    t.pen_ema, t.pen_peak = 0.0, 1.0  # would mean h_max if enabled
+    b = t.behaviour_update(torch.randn(16, t.encoder.latent_dim))
+    assert b["imagine/horizon"] == 5  # the plain cfg.imagination.horizon
+
+
+# ---------------- auto-dosed lambda ----------------
+def test_auto_dose_computes_finite_lam0_and_resumes_bitwise(tmp_path):
+    cfg = make_cfg(penalty={"auto_dose": {"enabled": True, "target_ratio": 0.1,
+                                          "warmup_updates": 3}})
+    torch.manual_seed(0)
+    t1 = Trainer(cfg, obs_dim=3, action_dim=1)
+    assert t1.model_update(fake_batch(seed=1))["penalty/lambda"] == 0.0  # warmup
+    assert t1.model_update(fake_batch(seed=2))["penalty/lambda"] == 0.0
+    assert t1.lam0_auto is None
+
+    # save MID-warmup: the accumulators themselves must resume
+    cm = CheckpointManager(tmp_path, OmegaConf.to_container(cfg), every=10)
+    cm.save(t1, env_steps=2, tag=f"step{t1.step}")  # resume() finds ckpt_step<N>.pt
+
+    m3 = t1.model_update(fake_batch(seed=3))  # warmup completes here
+    assert t1.lam0_auto is not None
+    assert math.isfinite(t1.lam0_auto) and t1.lam0_auto > 0
+    assert m3["penalty/lam0_auto"] == pytest.approx(t1.lam0_auto)
+    assert t1.lam.lam0 == pytest.approx(t1.lam0_auto)  # schedule was re-dosed
+    m4 = t1.model_update(fake_batch(seed=4))
+    assert m4["penalty/lambda"] > 0.0  # schedule active post-warmup
+
+    t2 = Trainer(cfg, obs_dim=3, action_dim=1)
+    cm2 = CheckpointManager(tmp_path, OmegaConf.to_container(cfg), every=10)
+    assert cm2.resume(t2) == 2
+    r3 = t2.model_update(fake_batch(seed=3))
+    r4 = t2.model_update(fake_batch(seed=4))
+    assert t2.lam0_auto == pytest.approx(t1.lam0_auto, rel=1e-12)
+    for k in ("loss/dyn", "loss/reward", "loss/total", "penalty/lambda"):
+        assert r3[k] == pytest.approx(m3[k], rel=1e-7), k
+        assert r4[k] == pytest.approx(m4[k], rel=1e-7), k
+
+
+def test_auto_dose_disabled_by_default():
+    t = Trainer(make_cfg(), obs_dim=3, action_dim=1)
+    m = t.model_update(fake_batch())
+    assert m["penalty/lambda"] > 0.0  # schedule runs from step 0 as before
+    assert "penalty/lam0_auto" not in m
+
+
+# ---------------- LayerNorm on the latent ----------------
+def test_layernorm_on_latent_and_in_ema_copy():
+    enc = Encoder(obs_dim=6, latent_dim=4, hidden=32, depth=1)
+    assert isinstance(enc.net[-1], nn.LayerNorm)
+    assert tuple(enc.net[-1].normalized_shape) == (4,)
+    assert enc.net[-1].elementwise_affine
+    ema = EMAEncoder(enc, decay=0.99)
+    assert isinstance(ema.ema.net[-1], nn.LayerNorm)  # deep-copied into EMA
+    out = enc(torch.randn(8, 6))
+    assert out.shape == (8, 4) and torch.isfinite(out).all()
+
+
+# ---------------- vectorized collection ----------------
+def test_vector_collection_masks_autoreset_boundaries():
+    gym = pytest.importorskip("gymnasium")
+    torch.manual_seed(0)
+    t = Trainer(make_cfg(), obs_dim=3, action_dim=1)
+    num_envs = 2
+    env = gym.vector.AsyncVectorEnv(
+        [lambda: gym.make("Pendulum-v1") for _ in range(num_envs)])
+    buf = ReplayBuffer(5000, 3, 1)
+    obs, _ = env.reset(seed=0)
+    autoreset = np.zeros(num_envs, dtype=bool)
+    obs, autoreset, taken = collect_vectorized(t, env, buf, obs, autoreset, 500)
+    env.close()
+
+    assert taken == 500
+    # Pendulum truncates at 200 -> each sub-env hits exactly one next-step
+    # autoreset boundary in 250 vector steps; that fake
+    # (final_obs, ignored_action, reset_obs) pair must NOT be in the buffer.
+    assert len(buf) == 500 - num_envs
+    # every stored transition is a real one-step Pendulum transition:
+    # |delta thetadot| per real step is bounded (~1.05); a reset jump is not.
+    n = len(buf)
+    dvel = np.abs(buf.obs_next[:n, 2] - buf.obs[:n, 2])
+    assert float(dvel.max()) < 1.3
+    assert np.isfinite(buf.obs[:n]).all() and np.isfinite(buf.rew[:n]).all()
+
+
+def test_symexp_overflow_clamped_and_nan_hygiene():
+    """Regression for the shiny-run crash: extrapolating reward heads in symlog
+    space overflowed symexp (expm1(>89) = inf in fp32) -> inf imagined rewards
+    -> NaN ret_scale/policy -> NaN pen_ema -> horizon controller ValueError.
+    The clamp must keep imagined rewards finite even with absurd head outputs,
+    and one NaN penalty must not poison pen_ema or crash the horizon."""
+    import math
+    import torch
+    from omegaconf import OmegaConf
+    from mbrl.training import Trainer
+
+    cfg = OmegaConf.create({
+        "seed": 0,
+        "model": {"latent_dim": 3, "hidden": 32, "depth": 1, "ema_decay": 0.99,
+                  "symlog_reward": True, "reward_heads": 3},
+        "penalty": {"n_probes": 2, "penalize_dynamics": False,
+                    "schedule": {"kind": "constant", "lam0": 1e-3, "t0": 100,
+                                 "floor": 0.0}},
+        "smoothing": {"enabled": False, "sigma": 1.5},
+        "imagination": {"horizon": 10, "gamma": 0.99, "lambda_": 0.95,
+                        "entropy_coef": 3e-4, "value_target_decay": 0.98,
+                        "pessimism": 0.5,
+                        "adaptive_horizon": {"enabled": True, "h_min": 5,
+                                             "h_max": 25, "decay": 0.99}},
+        "optim": {"model_lr": 3e-4, "policy_lr": 1e-4, "value_lr": 3e-4},
+    })
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    # force absurd symlog-space outputs (>> 89, the fp32 expm1 overflow point)
+    with torch.no_grad():
+        for head in t.reward.heads:
+            head.bias.fill_(500.0)
+    r_im, _ = t._imagined_reward(torch.randn(16, t.encoder.latent_dim),
+                                 torch.randn(16, 1))
+    assert torch.isfinite(r_im).all(), "clamp failed: symexp overflow"
+
+    b = t.behaviour_update(torch.randn(32, t.encoder.latent_dim))
+    assert math.isfinite(b["loss/policy"]) and math.isfinite(t.ret_scale)
+
+    # poisoned pen_ema path: a NaN penalty must not stick, horizon stays valid
+    t.pen_ema, t.pen_peak = 1.0, 2.0
+    import numpy as np
+    t.pen_ema = float("nan")
+    assert t._imagination_horizon() == 5  # guard, not ValueError

@@ -9,10 +9,12 @@ experiment:
   name: dev
 
 model:
-  latent_dim: 4         # compact-latent soft prior (R17) — sweep it, don't assume it
+  latent_dim: 4         # compact-latent soft prior (R17) — sweep it, don't assume it; capped at obs_dim automatically
   hidden: 256
   depth: 2
   ema_decay: 0.995
+  symlog_reward: true   # reward model predicts symlog(r); imagination symexps it back
+  reward_heads: 3       # ensemble: shared trunk + N linear heads (1 = plain model)
 
 penalty:
   n_probes: 2           # validated default (R4); sweep {1,2,4,8} = experiment 3
@@ -22,6 +24,11 @@ penalty:
                         # report sec.3: clamped +41 beat Frobenius -40; unclamped -79).
                         # 'clamped decaying trace' = this + a decaying schedule.
   penalize_dynamics: false   # R+T optional (R8/R9); NEVER add policy (R10)
+  auto_dose:            # auto-set lam0 from the measured fit/penalty scale ratio
+    enabled: false      # off by default — existing presets/regression runs untouched
+    target_ratio: 0.1   # lam0 = target_ratio * mean_fit_loss / mean_penalty
+    warmup_updates: 500 # model updates run at lam=0; dose measured on the tail 20%
+    lam0_max: 10.0      # hard cap (small-init models start near-linear -> ratio can explode)
   schedule:             # R12
     kind: cuberoot      # cuberoot | step | cosine | constant | sin2chirp
                         # sin2chirp: lam0*(1-t/T)*sin^2(chirped phase) — pow-free
@@ -45,6 +52,12 @@ imagination:
   lambda_: 0.95         # Dreamer lambda-returns
   entropy_coef: 3.0e-4
   value_target_decay: 0.98
+  pessimism: 0.5        # imagined reward = ensemble mean - pessimism * std
+  adaptive_horizon:     # curvature-certified horizon: longer as penalty EMA falls
+    enabled: true
+    h_min: 5
+    h_max: 25
+    decay: 0.99         # EMA decay for penalty/value tracking
 
 optim:
   model_lr: 3.0e-4
@@ -72,3 +85,6 @@ logging:
   project: mbrl-curvature
   tensorboard: true
   dir: results
+  video:                # eval rollout videos -> W&B (render failure only warns)
+    enabled: true
+    every_evals: 4      # record one extra rgb_array episode every Nth eval

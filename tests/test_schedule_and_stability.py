@@ -63,12 +63,14 @@ def test_return_normalization_bounds_policy_gradient():
     def grad_norm_with_reward_scale(scale):
         cfg = OmegaConf.create(OmegaConf.to_container(CFG))
         t = Trainer(cfg, obs_dim=3, action_dim=1)
-        with torch.no_grad():  # blow up the reward head output
-            t.reward.net[-1].weight.mul_(scale)
-            t.reward.net[-1].bias.add_(scale)
+        with torch.no_grad():  # blow up the reward head output(s)
+            for head in t.reward.heads:
+                head.weight.mul_(scale)
+                head.bias.add_(scale)
+        k = t.encoder.latent_dim  # effective latent dim (capped at obs_dim)
         for _ in range(5):  # let ret_scale EMA adapt
-            t.behaviour_update(torch.randn(64, 4, generator=torch.Generator().manual_seed(7)))
-        t.behaviour_update(torch.randn(64, 4, generator=torch.Generator().manual_seed(8)))
+            t.behaviour_update(torch.randn(64, k, generator=torch.Generator().manual_seed(7)))
+        t.behaviour_update(torch.randn(64, k, generator=torch.Generator().manual_seed(8)))
         return sum(p.grad.norm().item() for p in t.policy.parameters()
                    if p.grad is not None), t.ret_scale
 
@@ -81,7 +83,7 @@ def test_return_normalization_bounds_policy_gradient():
 def test_ret_scale_checkpointed(tmp_path):
     from mbrl.utils.checkpoint import CheckpointManager
     t = Trainer(CFG, obs_dim=3, action_dim=1)
-    t.behaviour_update(torch.randn(32, 4))
+    t.behaviour_update(torch.randn(32, t.encoder.latent_dim))
     assert t.ret_scale != 1.0
     cm = CheckpointManager(tmp_path, OmegaConf.to_container(CFG), every=10)
     cm.save(t, env_steps=0, tag="step0")

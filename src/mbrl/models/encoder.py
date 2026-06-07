@@ -11,10 +11,13 @@ import torch
 from torch import nn, Tensor
 
 
-def mlp(sizes, act=nn.SiLU, out_act=None):
+def mlp(sizes, act=nn.SiLU, out_act=None, init_std=0.02):
     layers = []
     for i in range(len(sizes) - 1):
-        layers.append(nn.Linear(sizes[i], sizes[i + 1]))
+        lin = nn.Linear(sizes[i], sizes[i + 1])
+        nn.init.normal_(lin.weight, std=init_std)
+        nn.init.zeros_(lin.bias)
+        layers.append(lin)
         if i < len(sizes) - 2:
             layers.append(act())
     if out_act is not None:
@@ -26,6 +29,8 @@ class Encoder(nn.Module):
     def __init__(self, obs_dim: int, latent_dim: int = 4, hidden: int = 256, depth: int = 2):
         super().__init__()
         self.net = mlp([obs_dim] + [hidden] * depth + [latent_dim])
+        # normalized latent: keeps z scale stable for dynamics/reward/penalty
+        self.net.append(nn.LayerNorm(latent_dim))
         self.latent_dim = latent_dim
 
     def forward(self, obs: Tensor) -> Tensor:

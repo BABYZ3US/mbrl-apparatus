@@ -17,17 +17,15 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from mbrl.training import Trainer, ReplayBuffer
+from mbrl.training import Trainer, ReplayBuffer, collect_vectorized
 from mbrl.utils import CheckpointManager, seed_everything, init_wandb
 from mbrl.utils.metrics_logger import MetricsLogger
 
 
 def make_env(cfg, num_envs: int):
     import gymnasium as gym
-    if num_envs > 1:
-        return gym.vector.AsyncVectorEnv(
-            [lambda: gym.make(cfg.env.name) for _ in range(num_envs)])
-    return gym.make(cfg.env.name)
+    return gym.vector.AsyncVectorEnv(
+        [lambda: gym.make(cfg.env.name) for _ in range(num_envs)])
 
 
 def evaluate(trainer, cfg, device, episodes: int = 3) -> float:
@@ -47,6 +45,25 @@ def evaluate(trainer, cfg, device, episodes: int = 3) -> float:
             done = term or trunc
     env.close()
     return total / episodes
+
+
+def record_episode_frames(trainer, cfg, device) -> list:
+    """One extra eval episode with rgb_array rendering — frames for wandb.Video."""
+    import gymnasium as gym
+    env = gym.make(cfg.env.name, render_mode="rgb_array")
+    frames = []
+    obs, _ = env.reset(seed=cfg.seed)
+    done = False
+    while not done:
+        frames.append(env.render())
+        with torch.no_grad():
+            z = trainer.encoder(torch.as_tensor(obs, dtype=torch.float32,
+                                                device=device).unsqueeze(0))
+            a, _ = trainer.policy.sample(z)
+        obs, _, term, trunc, _ = env.step(a.squeeze(0).cpu().numpy())
+        done = term or trunc
+    env.close()
+    return frames
 
 
 @hydra.main(config_path="../configs", config_name="base", version_base=None)
@@ -77,23 +94,23 @@ def main(cfg: DictConfig):
     env_steps = ckpt.resume(trainer) if cfg.checkpoint.resume == "auto" else 0
     ckpt.install_signal_handler(trainer, lambda: env_steps)
 
-    env = make_env(cfg, 1)
+    num_envs = int(cfg.training.get("num_envs", 1))
+    env = make_env(cfg, num_envs)
     obs, _ = env.reset(seed=cfg.seed)
+    autoreset = np.zeros(num_envs, dtype=bool)
+
+    video_cfg = cfg.logging.get("video", None)
+    video_enabled = bool(video_cfg and video_cfg.get("enabled", False))
+    video_every = int(video_cfg.get("every_evals", 4)) if video_cfg else 4
+    video_warned = False
+    eval_count = 0
 
     while env_steps < cfg.training.total_env_steps:
-        # ---- collect (CPU) ----
-        for _ in range(cfg.training.steps_per_iter):
-            with torch.no_grad():
-                z = trainer.encoder(torch.as_tensor(obs, dtype=torch.float32,
-                                                    device=device).unsqueeze(0))
-                a, _ = trainer.policy.sample(z)
-            a_np = a.squeeze(0).cpu().numpy()
-            obs_next, r, term, trunc, _ = env.step(a_np)
-            buffer.add(obs, a_np, r, obs_next)
-            obs = obs_next
-            env_steps += 1
-            if term or trunc:
-                obs, _ = env.reset()
+        # ---- collect (CPU, vectorized; gymnasium next-step autoreset masked) ----
+        obs, autoreset, taken = collect_vectorized(
+            trainer, env, buffer, obs, autoreset,
+            cfg.training.steps_per_iter, device=device)
+        env_steps += taken
 
         # ---- model learning (GPU) ----
         for _ in range(cfg.training.model_updates_per_iter):
@@ -106,11 +123,26 @@ def main(cfg: DictConfig):
         iteration = env_steps // cfg.training.steps_per_iter
         if iteration % cfg.training.eval_every_iters == 0:
             metrics["eval/return"] = evaluate(trainer, cfg, device)
+            eval_count += 1
+            if video_enabled and eval_count % video_every == 0:
+                # never let a headless/render failure kill training
+                try:
+                    import wandb
+                    frames = record_episode_frames(trainer, cfg, device)
+                    metrics["eval/video"] = wandb.Video(
+                        np.stack(frames).transpose(0, 3, 1, 2),
+                        fps=30, format="mp4")
+                except Exception as e:  # noqa: BLE001
+                    if not video_warned:
+                        print(f"[warn] eval video logging failed ({e!r}); "
+                              "training continues without videos")
+                        video_warned = True
         run.log(metrics)
         local_log.log(metrics)   # offline mirror -> figures without network
         ckpt.maybe_save(trainer, env_steps)
 
     ckpt.save(trainer, env_steps, tag=f"step{trainer.step}")
+    env.close()
     local_log.close()
     run.finish()
 

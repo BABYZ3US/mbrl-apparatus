@@ -84,7 +84,7 @@ def test_multitask_trainer_smoke():
              torch.randn(32, generator=g), torch.randn(32, 3, generator=g),
              torch.rand(32, 1, generator=g))
     m = t.model_update(batch)
-    b = t.behaviour_update(torch.randn(32, 4, generator=g),
+    b = t.behaviour_update(torch.randn(32, t.encoder.latent_dim, generator=g),
                            torch.rand(32, 1, generator=g))
     import math
     assert all(math.isfinite(v) for v in (*m.values(), *b.values()))
