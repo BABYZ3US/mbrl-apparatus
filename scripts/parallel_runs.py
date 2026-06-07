@@ -130,6 +130,24 @@ PRESETS |= {
     ]),
 }
 
+# The spectral RL validation ("the big one"): does the supervised +33.7%
+# (claims_ledger bridge run 3) survive contact with the RL loop? 3 arms, no
+# sweeps, HalfCheetah-by-default (pass env via --overrides):
+#   spec-ladder  — sigma ladder x lambda polynomial (the run-3 recipe preset)
+#   spec-single  — single-sigma spectral control (isolates the ladder effect)
+#   mlp-recipe   — the original MLP+Hutchinson recipe (known anchor +98 +- 23
+#                  on HalfCheetah; doubles as the apparatus regression test)
+# Recommended: 3 seeds for the two spectral arms; the anchor can run 1 seed
+# if GPU budget is tight (its HalfCheetah band is established).
+_SPEC = ["model.latent_dim=17", "training.total_env_steps=200000"]
+PRESETS |= {
+    "colab_spectral": ("train.py", [
+        ("spec-ladder", _SPEC + ["+experiment=spectral_ladder"]),
+        ("spec-single", _SPEC + ["spectral.enabled=true"]),
+        ("mlp-recipe",  _RECIPE),
+    ]),
+}
+
 
 def build_commands(args) -> list[tuple[str, list[str]]]:
     jobs = []

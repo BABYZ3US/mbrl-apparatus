@@ -1,7 +1,6 @@
+# @package _global_
 # Validation item 1 — multi-environment replication, the breadth gap.
 # Run as W&B sweep over env x seed on Colab GPU (Mode A).
-defaults:
-  - /base
 experiment:
   name: multienv
 training:

@@ -1,6 +1,5 @@
+# @package _global_
 # Validation item 5 — the k~4 lean (R17) vs GPS-effect prediction (R9).
-defaults:
-  - /base
 experiment:
   name: latentdim
 # sweep: model.latent_dim in {2, 4, 8, 16, 32}

@@ -33,6 +33,6 @@ setup: |
 
 run: |
   python scripts/train.py \
-    experiment=$EXP env=$ENV_NAME seed=$SEED \
+    +experiment=$EXP env=$ENV_NAME seed=$SEED \
     checkpoint.resume=auto \
     experiment.name=$EXP-$ENV_NAME

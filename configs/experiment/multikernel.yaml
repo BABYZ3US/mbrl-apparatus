@@ -1,6 +1,5 @@
+# @package _global_
 # Validation item 4 — R vs R+T (never pi, R10); log transversality angle.
-defaults:
-  - /base
 experiment:
   name: multikernel
 # sweep: penalty.penalize_dynamics in {false, true}

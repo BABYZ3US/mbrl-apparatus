@@ -1,6 +1,5 @@
+# @package _global_
 # Validation item 7 — Stone-rate curves n^(-2s/(2s+d)). LOCAL CPU.
-defaults:
-  - /base
 experiment:
   name: stone
 device: cpu
