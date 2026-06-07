@@ -298,3 +298,26 @@ def test_full_mlp_dynamics_ablation_arm():
     for i in range(4):
         m = t.model_update(fake_batch(seed=700 + i))
         assert np.isfinite(m["loss/dyn"])
+
+
+def test_encoder_aux_grounds_encoder_in_spectral_mode():
+    """Spectral mode trains the encoder through the aux reward loss (collapse
+    fix, 2026-06-08): with encoder_aux on, metrics expose aux_loss + z_std and
+    the encoder moves MORE than in the aux-off ablation."""
+    def run(aux):
+        torch.manual_seed(0)
+        cfg = make_cfg(encoder_aux=aux)
+        t = Trainer(cfg, obs_dim=3, action_dim=1)
+        w0 = [p.detach().clone() for p in t.encoder.parameters()]
+        last = {}
+        for i in range(8):
+            last = t.model_update(fake_batch(seed=800 + i))
+        delta = sum((p - q).abs().sum().item()
+                    for p, q in zip(t.encoder.parameters(), w0))
+        return last, delta
+    on, d_on = run(True)
+    off, d_off = run(False)
+    assert "latent/z_std" in on and on["latent/z_std"] > 0
+    assert "spectral/aux_loss" in on and np.isfinite(on["spectral/aux_loss"])
+    assert "spectral/aux_loss" not in off
+    assert d_on > d_off    # reward gradient reaches the encoder

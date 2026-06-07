@@ -291,6 +291,19 @@ architecture iteration).**
   noise-injection arm to separate rsample-averaging from logvar-damping as
   the variance mechanism.
 
+**Spectral encoder-collapse rule (2026-06-08, from the first HalfCheetah
+batch):** in spectral mode the encoder's only gradient was the dynamics MSE
+(reward cache and behaviour z0 are detached by design), whose trivial solution
+is near-constant z. Observed: spec-auto loss/dyn → 2e-5 (1000× below the MLP
+arm) with returns at random level — the dynamics became "perfect" by emptying
+the latents. Pendulum never surfaced this; MuJoCo did. FIX (default on):
+`spectral.encoder_aux` trains the otherwise-bypassed MLP reward head as an
+encoder-grounding auxiliary loss (no Hutchinson on it; the spectral head still
+produces all rewards). `latent/z_std` is now logged every update as the
+collapse early-warning. CONSEQUENCE: all spectral-arm results from the
+2026-06-08 HalfCheetah batch predate the fix and are void — the batch must be
+relaunched (config hash change starts fresh lineages automatically).
+
 **Spectral scheduling rule (user, 2026-06-07, from the first RL attempt):** never
 pair the spectral path with step anneals or zero-touching oscillations (sin2chirp
 nulls, step release). The closed-form refit has no inertia: the instant lambda ~ 0,

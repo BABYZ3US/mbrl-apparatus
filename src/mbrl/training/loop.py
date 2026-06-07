@@ -173,6 +173,10 @@ class Trainer:
             self.spec_cache_y = torch.zeros(0)
             self.spec_since_refit = 0   # model updates since last refit
             self.spec_refits = 0        # 0 => heads still predict zeros (logged)
+            # encoder-grounding auxiliary (see model_update): ON by default —
+            # without it the encoder collapses to constant z on MuJoCo
+            self.spec_aux = bool(sp.get("encoder_aux", True))
+            self.spec_aux_weight = float(sp.get("encoder_aux_weight", 1.0))
             # weights_mode: "poly" (schedule-driven lambda polynomial) or "snr"
             # (explicit Wiener weights from split-half band SNR — Tier-1
             # Wiener identity made load-bearing; cutoff at SNR=1, no hand shape,
@@ -463,8 +467,21 @@ class Trainer:
             lam_t = self.lam(self.step)
         if rew_loss is None:  # spectral: the MLP reward fit is skipped entirely
             loss = dyn_loss + lam_t * pen
+            # ENCODER-GROUNDING AUX (2026-06-08, HalfCheetah collapse): in
+            # spectral mode the encoder's only gradient is dyn MSE — whose
+            # trivial solution is a near-constant z (observed: loss/dyn
+            # 2e-5, 1000x below the MLP arm, returns random). The bypassed
+            # MLP reward head is trained as an auxiliary loss purely to keep
+            # z reward-informative; the spectral head remains the reward used
+            # everywhere. No Hutchinson on the aux (spectral penalty is exact).
+            if self.spec_enabled and self.spec_aux:
+                aux = F.mse_loss(self.reward(z, a, tau), r_target)
+                loss = loss + self.spec_aux_weight * aux
+                spec_metrics["spectral/aux_loss"] = aux.item()
         else:
             loss = dyn_loss + rew_loss + lam_t * pen  # original op order (bitwise)
+        if self.spec_enabled:   # collapse early-warning, ~free
+            spec_metrics["latent/z_std"] = z.detach().std(0).mean().item()
 
         self.model_opt.zero_grad(set_to_none=True)
         loss.backward()
