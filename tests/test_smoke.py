@@ -2,6 +2,10 @@
 (collect -> model learning w/ penalty -> imagination -> behaviour update ->
 checkpoint). Asserts finite losses and a penalty that the schedule is acting on.
 CPU, < 1 minute. This is the gate before any Colab time is spent."""
+import pytest
+
+pytestmark = pytest.mark.slow
+
 import sys
 from pathlib import Path
 

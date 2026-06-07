@@ -56,8 +56,19 @@ POLY_CONFIGS = [
 ]
 MLP_LAM = 1e-2          # the transversality_test default dose
 MLP_EPOCHS = 1500
-CELLS_PATH = Path("results/spectral_benchmark_cells.jsonl")
-OUT_PATH = Path("results/spectral_benchmark.json")
+import subprocess as _sp
+
+def _git_sha() -> str:
+    try:
+        return _sp.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                cwd=Path(__file__).resolve().parents[1],
+                                text=True).strip()
+    except Exception:
+        return "nogit"
+
+RESULTS_DIR = Path("results/bench") / _git_sha()   # provenance (plan #13)
+CELLS_PATH = RESULTS_DIR / "spectral_benchmark_cells.jsonl"
+OUT_PATH = RESULTS_DIR / "spectral_benchmark.json"
 
 
 def make_data(n: int, seed: int):

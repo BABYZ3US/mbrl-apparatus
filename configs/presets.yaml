@@ -1,0 +1,124 @@
+# Preset registry for scripts/parallel_runs.py (improvement plan #9).
+# Presets are DATA: each arm = name + optional `use:` (constants prepended in
+# order) + overrides. Hydra last-wins, so arm overrides beat constants.
+
+constants:
+  # Original-report doses (sec.7): lam=0.5, step-anneal released at half of
+  # training. 200K env steps x (200 model updates / 1000 env steps) = 40K
+  # schedule steps.
+  recipe:
+    - penalty.schedule.kind=step
+    - penalty.schedule.lam0=0.5
+    - penalty.form=frobenius
+    - penalty.auto_dose.enabled=false
+    - +penalty.schedule.step_at=0.5
+    - +penalty.schedule.step_factor=0.0
+    - +penalty.schedule.total_steps=40000
+    - training.total_env_steps=200000
+  spec:
+    - model.latent_dim=17
+    - training.total_env_steps=200000
+  # spectral arms: smooth floored decay ONLY (closed-form refits have no
+  # inertia) + latent capped at 1x obs_dim (ledger, 2026-06-07)
+  spec_guard:
+    - penalty.schedule.kind=cuberoot
+    - penalty.schedule.floor=1e-5
+    - +model.latent_cap_mult=1
+  # Wide-latent (4x obs, auto-capped) + rank-locked sincos interference,
+  # scaled to 5x the local sample budget.
+  mtw:
+    - model.latent_dim=9999
+    - penalty.schedule.kind=sincos
+    - +penalty.schedule.period2_mode=multiple
+    - +penalty.schedule.period2_mult=12
+    - +penalty.schedule.total_steps=100000
+    - penalty.auto_dose.warmup_updates=2000
+    - training.total_env_steps=500000
+
+presets:
+  # The multi-task science grid: regularized vs lam0=0 vs within-task-only.
+  multitask_ablation:
+    script: train_multitask.py
+    arms:
+      - {name: multitask-reg}
+      - {name: multitask-lam0, overrides: [penalty.schedule.lam0=0,
+                                           penalty.schedule.floor=0,
+                                           penalty.auto_dose.enabled=false]}
+      - {name: multitask-notask, overrides: [penalty.include_task=false]}
+
+  # lambda-schedule ablation (validation item 8) on Pendulum
+  schedule_ablation:
+    script: train.py
+    arms:
+      - {name: sched-cuberoot, overrides: [penalty.schedule.kind=cuberoot, penalty.form=frobenius]}
+      - {name: sched-step, overrides: [penalty.schedule.kind=step, penalty.form=frobenius,
+                                       +penalty.schedule.total_steps=20000]}
+      - {name: sched-cosine, overrides: [penalty.schedule.kind=cosine, penalty.form=frobenius,
+                                         +penalty.schedule.total_steps=20000]}
+      - {name: sched-constant, overrides: [penalty.schedule.kind=constant, penalty.form=frobenius]}
+      - {name: sched-sin2chirp, overrides: [penalty.schedule.kind=sin2chirp, penalty.form=frobenius]}
+      - {name: sched-sincos, overrides: [penalty.schedule.kind=sincos, penalty.form=frobenius]}
+      # resonance hypothesis: f2 = m*f1 (m = latent rank) vs golden control
+      - {name: sched-sincos-comm, overrides: [penalty.schedule.kind=sincos,
+                                              +penalty.schedule.period2_mode=multiple,
+                                              +penalty.schedule.period2_mult=4]}
+      - {name: sched-sincos-gold, overrides: [penalty.schedule.kind=sincos,
+                                              +penalty.schedule.period2_mode=golden]}
+      # floor hypothesis: lambda -> exactly 0 should degrade late training
+      - {name: sched-step-zero, overrides: [penalty.schedule.kind=step, penalty.form=frobenius,
+                                            +penalty.schedule.total_steps=20000,
+                                            penalty.schedule.floor=0]}
+      # the user's narrowed-down recipe: clamped decaying TRACE penalty
+      - {name: sched-trace-chirp, overrides: [penalty.schedule.kind=sin2chirp,
+                                              penalty.form=laplacian_trace]}
+
+  # GPU-lean Colab arms: fixed doses, no sweeps. Pass env via --overrides.
+  colab_recipe:
+    script: train.py
+    arms:
+      - {name: recipe, use: [recipe]}
+  colab_control:
+    script: train.py
+    arms:
+      - {name: control, overrides: [penalty.schedule.lam0=0,
+                                    penalty.auto_dose.enabled=false,
+                                    penalty.schedule.floor=0,
+                                    smoothing.enabled=false,
+                                    training.total_env_steps=200000]}
+  colab_estimator:
+    script: train.py
+    arms:
+      - {name: est-frobenius, use: [recipe]}
+      - {name: est-trace, use: [recipe], overrides: [penalty.form=laplacian_trace]}
+  colab_schedule_final:
+    script: train.py
+    arms:
+      - {name: sched-step-champ, use: [recipe]}
+      - {name: sched-challenger, overrides: [penalty.schedule.kind=sin2chirp,
+                                             penalty.schedule.lam0=0.5,
+                                             +penalty.schedule.period0=8000,
+                                             +penalty.schedule.period_end=1000,
+                                             +penalty.schedule.total_steps=40000,
+                                             training.total_env_steps=200000]}
+
+  colab_multitask_wide:
+    script: train_multitask.py
+    arms:
+      - {name: mtw-reg, use: [mtw]}
+      - {name: mtw-lam0, use: [mtw], overrides: [penalty.schedule.lam0=0,
+                                                 penalty.schedule.floor=0,
+                                                 penalty.auto_dose.enabled=false]}
+      - {name: mtw-notask, use: [mtw], overrides: [penalty.include_task=false]}
+
+  # The spectral RL validation ("the big one"): 5 arms, no sweeps.
+  # spec-ladder = fixed-ladder control for spec-auto; mlp-recipe = the +98+-23
+  # HalfCheetah anchor / apparatus regression test (1 seed is enough if tight).
+  colab_spectral:
+    script: train.py
+    arms:
+      - {name: spec-ladder, use: [spec], overrides: [+experiment=spectral_ladder]}
+      - {name: spec-single, use: [spec, spec_guard], overrides: [spectral.enabled=true]}
+      - {name: mlp-recipe, use: [recipe]}
+      - {name: spec-auto, use: [spec], overrides: [+experiment=spectral_auto]}
+      - {name: spec-learned, use: [spec, spec_guard],
+         overrides: [spectral.enabled=true, spectral.sigma_w=learned]}

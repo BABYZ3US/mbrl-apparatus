@@ -30,4 +30,5 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.pytest.ini_options]
+markers = ["slow: integration tests (full env loops); excluded by make test, run by make test-all"]
 testpaths = ["tests"]

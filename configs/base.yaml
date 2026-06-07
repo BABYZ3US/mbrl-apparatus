@@ -103,6 +103,11 @@ spectral:               # closed-form RFF spectral reward (models/spectral.py)
                         # spectral/sigma_at_snr1.
   snr_bands: 8          # |w|-quantile bands for the SNR estimate
   snr_ema: 0.9          # EMA over refits (stabilizes the split-half estimate)
+  recal_every: 0        # sigma_w=auto: re-probe sigma* every N refits (0=off);
+                        # ladder rebuilt only if sigma* moved > recal_drift x
+  recal_drift: 2.0
+  sigma_wd: 1.0e-3      # sigma_w=learned: L2 anchor on log_s toward init
+                        # (bounds drift toward overfit-friendly bandwidths)
 
 smoothing:              # DreamSmooth (recipe 2.5)
   enabled: true

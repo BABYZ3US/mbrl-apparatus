@@ -89,8 +89,21 @@ N_FEATURES = 512
 ALPHAS = [0.05, 0.2, 0.5, 0.8, 0.95]   # hybrid: weight on the wide diag cut
 ARMS = ("frobenius_diag", "lap2_positive", "lap2_indefinite",
         "hybrid_diag_gram")
-CELLS_PATH = Path("results/bridge_experiment_cells.jsonl")
-OUT_PATH = Path("results/bridge_experiment.json")
+import subprocess as _sp
+
+def _git_sha() -> str:
+    try:
+        return _sp.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                cwd=Path(__file__).resolve().parents[1],
+                                text=True).strip()
+    except Exception:
+        return "nogit"
+
+# provenance (improvement plan #13): results scoped by commit so every
+# ledger number stays reproducible from its sha
+RESULTS_DIR = Path("results/bridge") / _git_sha()
+CELLS_PATH = RESULTS_DIR / "bridge_experiment_cells.jsonl"
+OUT_PATH = RESULTS_DIR / "bridge_experiment.json"
 
 
 def make_data(n: int, seed: int):
@@ -324,11 +337,11 @@ def angle_sweep(n: int = 512, seeds=(0, 1, 2, 3, 4),
         print(f"\nangle range {min(angs):.1f}-{max(angs):.1f} deg; "
               f"Spearman(angle, hybrid benefit) = {spearman(angs, bens):+.2f} "
               f"(n={len(pts)})")
-        Path("results").mkdir(exist_ok=True)
-        Path("results/bridge_angle_sweep.json").write_text(json.dumps(
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        (RESULTS_DIR / "bridge_angle_sweep.json").write_text(json.dumps(
             [{"angle_deg": a, "rel_benefit": b, "sigma_w": s, "seed": sd}
              for a, b, s, sd in pts], indent=1))
-        print("wrote results/bridge_angle_sweep.json")
+        print(f"wrote {RESULTS_DIR}/bridge_angle_sweep.json")
 
 
 # ---------------- recipe test: sigma parameterized over the transform ----------------
@@ -342,8 +355,8 @@ RECIPE_SHAPES = [                       # the lambda transverse polynomial shape
     {"name": "full-123",       "degrees": [1, 2, 3], "coefs": [1.0, 1.0, 1.0]},
     {"name": "high-clamp",     "degrees": [1, 3],    "coefs": [0.1, 10.0]},
 ]
-RECIPE_CELLS = Path("results/bridge_recipe_cells.jsonl")
-RECIPE_OUT = Path("results/bridge_recipe_test.json")
+RECIPE_CELLS = RESULTS_DIR / "bridge_recipe_cells.jsonl"
+RECIPE_OUT = RESULTS_DIR / "bridge_recipe_test.json"
 RECIPE_NS = [512, 2048]
 RECIPE_SEEDS = [0, 1, 2, 3, 4]
 
@@ -512,6 +525,75 @@ def recipe_run(budget: float):
         print(f"\nall {len(cells)} cells done — wrote {RECIPE_OUT}")
 
 
+def angle_deconfound(n: int = 512, seeds=(0, 1, 2, 3, 4),
+                     gammas=(1.0, 2.0, 4.0, 8.0)):
+    """Deconfound run 2 (improvement plan #5): move the diag-vs-Gram angle AT
+    FIXED BANDWIDTH via anisotropic frequency draws — stretch W along a random
+    unit direction by gamma, then rescale so mean |w|^2 is unchanged. If the
+    hybrid benefit tracks the angle here too, 'angle causes benefit' survives
+    with the bandwidth confound removed; if it flattens, run 2's correlation
+    was a bandwidth proxy."""
+    import math
+
+    from mbrl.models.spectral import SpectralReward
+
+    pts = []
+    for seed in seeds:
+        xa_tr, r_tr, xa_va, r_va, xa_te, r_te = make_data(n, seed)
+        d = xa_tr.shape[1]
+        u = torch.randn(d, generator=torch.Generator().manual_seed(seed + 31))
+        u = u / u.norm()
+        for gamma in gammas:
+            sr = SpectralReward(d, n_features=N_FEATURES, sigma_w=0.5, seed=seed)
+            W = sr.W + (gamma - 1.0) * (sr.W @ u).unsqueeze(-1) * u
+            W = W * (sr.W.pow(2).sum().sqrt() / W.pow(2).sum().sqrt())  # fixed E|w|^2
+            sr.W = W
+            sr.w2 = W.pow(2).sum(-1)
+            sr.w4 = sr.w2.pow(2)
+            Phi_tr, Phi_va, Phi_te = (sr.features(xa_tr), sr.features(xa_va),
+                                      sr.features(xa_te))
+            A0, rhs = Phi_tr.T @ Phi_tr, Phi_tr.T @ r_tr
+            eye = torch.eye(sr.M)
+            P_diag = penalty_matrix("frobenius_diag", sr, Phi_tr, seed)
+            P_gram = penalty_matrix("lap2_positive", sr, Phi_tr, seed)
+            cosang = float((P_diag * P_gram).sum()
+                           / (P_diag.norm() * P_gram.norm() + 1e-30))
+            ang = math.degrees(math.acos(max(-1.0, min(1.0, cosang))))
+
+            def best(sweep):
+                b = None
+                for P, lam in sweep:
+                    try:
+                        c = torch.linalg.solve(A0 + lam * P + 1e-8 * eye, rhs)
+                    except RuntimeError:
+                        continue
+                    if not torch.isfinite(c).all():
+                        continue
+                    val = F.mse_loss(Phi_va @ c, r_va).item()
+                    if b is None or val < b[0]:
+                        b = (val, F.mse_loss(Phi_te @ c, r_te).item())
+                return b
+            diag_b = best([(P_diag, lam) for lam in LAMS])
+            hyb_b = best([(a * P_diag + (1 - a) * P_gram, lam)
+                          for lam in LAMS for a in ALPHAS])
+            if diag_b is None or hyb_b is None:
+                continue
+            rel = (diag_b[1] - hyb_b[1]) / diag_b[1]
+            pts.append((ang, rel, gamma, seed))
+            print(f"gamma={gamma:g} seed={seed}: angle={ang:.1f} deg  "
+                  f"benefit={rel:+.1%}")
+    if len(pts) >= 4:
+        angs, bens = [p[0] for p in pts], [p[1] for p in pts]
+        print(f"\nFIXED-BANDWIDTH angle range {min(angs):.1f}-{max(angs):.1f} "
+              f"deg; Spearman(angle, benefit) = {spearman(angs, bens):+.2f} "
+              f"(n={len(pts)}; run-2 confounded value was +0.63)")
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        (RESULTS_DIR / "bridge_angle_deconfound.json").write_text(json.dumps(
+            [{"angle_deg": a, "rel_benefit": b, "gamma": g, "seed": s}
+             for a, b, g, s in pts], indent=1))
+        print(f"wrote {RESULTS_DIR}/bridge_angle_deconfound.json")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--budget", type=float, default=30.0)
@@ -519,11 +601,17 @@ def main():
     p.add_argument("--angle-sweep", action="store_true",
                    help="sigma_w sweep: move the diag-vs-Gram angle, test "
                         "whether hybrid benefit tracks it")
+    p.add_argument("--angle-deconfound", action="store_true",
+                   help="anisotropic-W sweep: move the angle at FIXED "
+                        "bandwidth (improvement plan #5)")
     p.add_argument("--recipe", action="store_true",
                    help="sigma-ladder + lambda-polynomial (+ Gram) recipe test")
     args = p.parse_args()
     if args.angle_sweep:
         angle_sweep()
+        return
+    if args.angle_deconfound:
+        angle_deconfound()
         return
     if args.recipe:
         recipe_run(args.budget)

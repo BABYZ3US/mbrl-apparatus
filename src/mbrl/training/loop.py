@@ -176,6 +176,31 @@ class Trainer:
             self.spec_snr_ema = [None] * self.spec_nheads  # per-head theta
             self.spec_snr_info = None   # last head-0 band diagnostics
             self.spec_snr_gen = torch.Generator().manual_seed(int(cfg.seed) + 777)
+            # recalibration-on-drift (improvement plan #2): sigma* is measured
+            # on early-policy data; re-probe every recal_every refits and
+            # rebuild the ladder if it moved more than recal_drift x.
+            self.spec_auto = (self.spec_sigma == "auto")
+            self.spec_recal_every = int(sp.get("recal_every", 0))   # 0 = off
+            self.spec_recal_drift = float(sp.get("recal_drift", 2.0))
+            # learned-sigma elastic anchor (improvement plan #3): L2 on log_s
+            # toward init bounds the drift toward overfit-friendly bandwidths
+            self.spec_sigma_wd = float(sp.get("sigma_wd", 1e-3))
+            # config validator (improvement plan #11): warn loudly on known-bad
+            # combinations; never error — ablations must stay possible
+            import warnings as _w
+            _kind = str(cfg.penalty.schedule.get("kind", ""))
+            _floor = float(cfg.penalty.schedule.get("floor", 0.0) or 0.0)
+            if _kind in ("step", "sincos", "sin2chirp") or _floor <= 0.0:
+                _w.warn(f"[spectral] schedule kind={_kind} floor={_floor}: "
+                        "zero-touching schedules make the next closed-form "
+                        "refit an unregularized interpolator (ledger, "
+                        "2026-06-07). Use cuberoot with floor > 0 unless this "
+                        "is a deliberate ablation arm.")
+            if int(cfg.model.get("latent_cap_mult", 4)) > 1:
+                _w.warn("[spectral] latent_cap_mult > 1 with the spectral "
+                        "path: wide latents overfit the closed-form reward "
+                        "fit (ledger, 2026-06-07). Set model.latent_cap_mult=1 "
+                        "unless deliberately ablating.")
 
     # ---------------- spectral reward (closed-form RFF ridge ensemble) ----------------
     def _build_spec_heads(self, sigma_w, learn: bool = False):
@@ -213,6 +238,23 @@ class Trainer:
             self.spec_sigma_star = cinfo["sigma_star"]
             self.spec_sigma = ladder      # frozen for the run (checkpointed)
             self.spec_heads = self._build_spec_heads(ladder)
+        elif (self.spec_auto and self.spec_recal_every > 0 and self.spec_heads
+              and self.spec_refits > 0
+              and self.spec_refits % self.spec_recal_every == 0):
+            # recalibration-on-drift: re-probe sigma*; rebuild the basis only
+            # if it moved more than recal_drift x (c re-anchors immediately
+            # below, so a rebuild at a refit boundary is safe)
+            from ..models.spectral import calibrate_sigma_ladder
+            ladder, cinfo = calibrate_sigma_ladder(
+                X.cpu(), y.cpu(), mults=self.spec_cal_mults,
+                n_features=self.spec_nf, seed=int(self.cfg.seed))
+            new_star, old_star = cinfo["sigma_star"], self.spec_sigma_star
+            self.spec_sigma_star = new_star   # always log the fresh value
+            ratio = new_star / max(old_star, 1e-12)
+            if ratio > self.spec_recal_drift or ratio < 1.0 / self.spec_recal_drift:
+                self.spec_sigma = ladder
+                self.spec_heads = self._build_spec_heads(ladder)
+                self.spec_snr_ema = [None] * self.spec_nheads
         for i, head in enumerate(self.spec_heads):
             if self.spec_weights_mode == "snr":
                 theta, info = snr_band_weights(
@@ -228,6 +270,13 @@ class Trainer:
                 head.fit(X, y, weights=theta)
             else:
                 head.fit(X, y, weights=self._spectral_band_weights(head, self.step))
+        # band-SNR diagnostics on EVERY refit regardless of mode (improvement
+        # plan #4): drift detection + overfit early-warning, ~free at M=512
+        if self.spec_weights_mode != "snr" and self.spec_heads:
+            h0 = self.spec_heads[0]
+            _, self.spec_snr_info = snr_band_weights(
+                h0.features(X), y, h0.w2.sqrt(),
+                n_bands=self.spec_snr_bands, generator=self.spec_snr_gen)
         self.spec_refits += 1
         self.spec_since_refit = 0
 
@@ -296,6 +345,9 @@ class Trainer:
                 pred = torch.stack([h.predict(x_spec)
                                     for h in self.spec_heads]).mean(0)
                 sig_loss = F.mse_loss(pred, r_target.detach())
+                if self.spec_sigma_wd > 0:   # elastic anchor toward init
+                    sig_loss = sig_loss + self.spec_sigma_wd * sum(
+                        h.log_s.pow(2).sum() for h in self.spec_heads)
                 self.spec_sigma_opt.zero_grad(set_to_none=True)
                 sig_loss.backward()
                 self.spec_sigma_opt.step()
@@ -311,7 +363,7 @@ class Trainer:
                     eff = torch.exp(h0.log_s)
                     for kk in range(len(eff)):
                         spec_metrics[f"spectral/sigma_scale_{kk}"] = float(eff[kk])
-            if self.spec_weights_mode == "snr" and self.spec_snr_info:
+            if self.spec_snr_info:   # logged for every mode (plan #4)
                 inf = self.spec_snr_info
                 if inf.get("band_snrs"):
                     spec_metrics["spectral/snr_min"] = min(inf["band_snrs"])

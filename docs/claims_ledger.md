@@ -106,6 +106,16 @@ needs an angle knob at fixed bandwidth (e.g., anisotropic W draws). Practical no
 σ_w=0.5 also has the best absolute MSE — low bandwidth + hybrid is the recommended
 closed-form recipe pending the deconfound.
 
+**Run 2b (2026-06-08, `--angle-deconfound`): angle causation NOT supported at fixed
+bandwidth.** Anisotropic W draws (stretch along a random direction by γ ∈ [1,8],
+mean |w|² held fixed) move the diag-vs-Gram angle only 72.9–79.2° and within that
+range Spearman(angle, hybrid benefit) = **−0.12** (n=9) vs +0.63 confounded. The
+benefit DOES vary with γ (anisotropy degrades it), just not through the angle.
+Reading: low bandwidth causes both the wide angle and the hybrid benefit; the angle
+is a correlate, not the lever. Caveat: anisotropy is a weak instrument here (~6° of
+leverage vs run 2's ~15°), so this is "not supported", not "refuted". The practical
+recipe (low σ + hybrid/ladder) is unaffected — only the causal story changes.
+
 **Bridge run 3 (2026-06-07, `--recipe`): sigma parameterized over the transform ×
 lambda polynomial is the winning recipe — user's suspicion confirmed.** Multi-scale
 RFF frame (log-spaced σ ladder 0.25–2.0 across feature blocks) vs single σ=0.5

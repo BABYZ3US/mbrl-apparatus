@@ -1,8 +1,11 @@
 # Common entry points. All targets are safe to re-run (benchmarks are
 # cell-resumable; tests are hermetic).
-.PHONY: test lint bench bridge recipe angle dashboard figures spectral-rl clean
+.PHONY: test test-all lint bench bridge recipe angle dashboard figures spectral-rl status ledger-check clean
 
-test:
+test:              ## fast set (excludes @slow integration tests)
+	python -m pytest tests/ -q -m "not slow"
+
+test-all:
 	python -m pytest tests/ -q
 
 lint:
@@ -22,6 +25,12 @@ angle:            ## transversality angle sweep (run 2's sigma_w sweep)
 
 dashboard:
 	python scripts/make_dashboard.py
+
+status:           ## what is running / finished / missing
+	python scripts/status.py
+
+ledger-check:     ## recompute headline numbers, verify the ledger quotes them
+	python scripts/ledger_check.py
 
 figures:
 	python scripts/make_figures.py
