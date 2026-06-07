@@ -98,6 +98,13 @@ def main(cfg: DictConfig):
     env = make_env(cfg, num_envs)
     obs, _ = env.reset(seed=cfg.seed)
     autoreset = np.zeros(num_envs, dtype=bool)
+    import time as _time
+    _t_run = _time.perf_counter()
+    print(f"[train] {cfg.experiment.name}-{cfg.env.name}-s{cfg.seed}: starting "
+          f"at env_steps={env_steps}, target={cfg.training.total_env_steps} "
+          f"({cfg.training.steps_per_iter} steps + "
+          f"{cfg.training.model_updates_per_iter} model updates / iter — the "
+          "FIRST W&B point lands when iteration 1 completes)", flush=True)
 
     video_cfg = cfg.logging.get("video", None)
     video_enabled = bool(video_cfg and video_cfg.get("enabled", False))
@@ -113,8 +120,11 @@ def main(cfg: DictConfig):
         env_steps += taken
 
         # ---- model learning (GPU) ----
-        for _ in range(cfg.training.model_updates_per_iter):
+        for _u in range(cfg.training.model_updates_per_iter):
             metrics = trainer.model_update(buffer.sample(cfg.optim.batch_size))
+            if _u % 50 == 0:   # live telemetry between iteration commits
+                run.log({"live/loss_total": metrics["loss/total"],
+                         "live/model_update": trainer.step})
         # ---- behaviour learning on imagined rollouts (GPU) ----
         # (was a single update per iteration — a bug that starved the policy at
         # ~100 updates per run and pinned all schedule-ablation arms at
@@ -144,6 +154,10 @@ def main(cfg: DictConfig):
                         video_warned = True
         run.log(metrics)
         local_log.log(metrics)   # offline mirror -> figures without network
+        print(f"[train] iter {iteration} env_steps={env_steps} "
+              f"loss/total={metrics.get('loss/total', float('nan')):.4f} "
+              f"eval={metrics.get('eval/return', '-')} "
+              f"({_time.perf_counter() - _t_run:.0f}s elapsed)", flush=True)
         ckpt.maybe_save(trainer, env_steps)
 
     ckpt.save(trainer, env_steps, tag=f"step{trainer.step}")

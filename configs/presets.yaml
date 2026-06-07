@@ -125,9 +125,12 @@ presets:
 
   # Run 9 (pre-registered): the dynamics iteration. Pendulum, local CPU OK.
   # dyn-mlp is the deliberate R15 break — ablation arm, never a default.
+  # 20K steps = the established local Pendulum convention (sched-* arms were
+  # adjudicated at 20K); ~manageable wall time at 3 concurrent single-threaded
+  # procs on the M2. Scale up only after the 20K readout separates arms.
   dynamics_ablation:
     script: train.py
     arms:
-      - {name: dyn-affine, overrides: [model.dynamics=affine]}
-      - {name: dyn-gaussian, overrides: [model.dynamics=gaussian]}
-      - {name: dyn-mlp, overrides: [model.dynamics=mlp]}
+      - {name: dyn-affine, overrides: [model.dynamics=affine, training.total_env_steps=20000]}
+      - {name: dyn-gaussian, overrides: [model.dynamics=gaussian, training.total_env_steps=20000]}
+      - {name: dyn-mlp, overrides: [model.dynamics=mlp, training.total_env_steps=20000]}

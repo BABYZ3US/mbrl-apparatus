@@ -71,7 +71,9 @@ def run_one(name: str, cmd: list[str]) -> tuple[str, int]:
     """One training process. Single-threaded math libs: parallelism comes from
     process count, not intra-op threads (avoids 8 runs x 8 threads thrash)."""
     env = os.environ | {"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
-                        "VECLIB_MAXIMUM_THREADS": "1"}
+                        "VECLIB_MAXIMUM_THREADS": "1",
+                        # unbuffered: heartbeats reach the log files live
+                        "PYTHONUNBUFFERED": "1"}
     log = LOGDIR / f"{name}.log"
     with open(log, "w") as fh:
         rc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
