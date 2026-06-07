@@ -113,18 +113,19 @@ presets:
   # The spectral RL validation ("the big one"): 5 arms, no sweeps.
   # spec-ladder = fixed-ladder control for spec-auto; mlp-recipe = the +98+-23
   # HalfCheetah anchor / apparatus regression test (1 seed is enough if tight).
+  # NOTE: jobs launch in arm order and queue behind busy workers — the
+  # arms you care about most go FIRST (champion's absence in two batches
+  # was queue position, not failure).
   colab_spectral:
     script: train.py
     arms:
+      - {name: champion, use: [spec], overrides: [+experiment=champion]}
+      - {name: spec-auto, use: [spec], overrides: [+experiment=spectral_auto]}
       - {name: spec-ladder, use: [spec], overrides: [+experiment=spectral_ladder]}
       - {name: spec-single, use: [spec, spec_guard], overrides: [spectral.enabled=true]}
       - {name: mlp-recipe, use: [recipe]}
-      - {name: spec-auto, use: [spec], overrides: [+experiment=spectral_auto]}
       - {name: spec-learned, use: [spec, spec_guard],
          overrides: [spectral.enabled=true, spectral.sigma_w=learned]}
-      # the assembled champion (auto ladder + gaussian dynamics) joins the
-      # comparison as its own arm — same budget/latent as the spec arms
-      - {name: champion, use: [spec], overrides: [+experiment=champion]}
 
   # Run 9 (pre-registered): the dynamics iteration. Pendulum, local CPU OK.
   # dyn-mlp is the deliberate R15 break — ablation arm, never a default.
