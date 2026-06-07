@@ -256,7 +256,20 @@ architecture iteration).**
   shows the predicted imagined-return variance blowup / worse return at
   matched dose. FALSIFIER for (b): full-MLP matches affine ⇒ the
   zero-action-curvature design claim is decorative at Pendulum scale and R15
-  needs requalification on MuJoCo. RESULTS: pending.
+  needs requalification on MuJoCo.
+
+  **Attempt 1 (2026-06-08): CONFOUNDED — no adjudication.** Arms ran at mixed
+  budgets (launch predates the 20K preset trim): affine ~45K steps, gaussian
+  100K/100K/20K, mlp 20K×3. Provisional observations, not verdicts: returns
+  statistically flat (affine −1060±27, mlp −1123±116, gaussian −1153±178);
+  gaussian's imagined-return variance FOUR orders lower (late-median 1.4e3 vs
+  ~7e7; max 5.5e5 vs affine 2.4e15) — the mechanism without the return
+  payoff; the R15 variance prediction looked inverted (affine worst max
+  spike) but affine ran 2× longer, so uninterpretable. Calibration
+  (criterion a) was UNINSTRUMENTED in attempt 1 — now logged every update as
+  dyn/calib_corr, dyn/calib_ratio (~0.8 = well-calibrated Gaussian),
+  dyn/pred_std. Attempt 2: matched 20K, same seeds, criteria unchanged.
+  RESULTS: pending.
 
 **Spectral scheduling rule (user, 2026-06-07, from the first RL attempt):** never
 pair the spectral path with step anneals or zero-touching oscillations (sin2chirp

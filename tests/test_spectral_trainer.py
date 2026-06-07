@@ -269,6 +269,9 @@ def test_gaussian_dynamics_trainer_smoke():
     for i in range(8):
         m = t.model_update(fake_batch(seed=600 + i))
         assert np.isfinite(m["loss/dyn"])
+        # run-9 calibration telemetry present and finite on the gaussian path
+        assert "dyn/calib_corr" in m and np.isfinite(m["dyn/calib_corr"])
+        assert m["dyn/pred_std"] > 0
     # stochastic forward: two rollout steps from the same (z, a) differ
     z = torch.randn(5, t.encoder.latent_dim)
     a = torch.randn(5, 1)

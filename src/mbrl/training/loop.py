@@ -306,8 +306,22 @@ class Trainer:
         with torch.no_grad():
             z_next_tgt = self.ema(obs_next)
 
+        dyn_calib = {}
         if self.dyn_stochastic:   # Gaussian NLL on the transition distribution
             dyn_loss = self.dynamics.nll(z, a, z_next_tgt)
+            # calibration telemetry (run-9 criterion (a)): does predicted sigma
+            # track realized error? corr > 0.5 = calibrated; ratio ~ 0.8 for a
+            # well-calibrated Gaussian (E|N(0,1)| = 0.798)
+            with torch.no_grad():
+                mu, lv = self.dynamics.moments(z, a)
+                std = torch.exp(0.5 * lv).flatten()
+                err = (z_next_tgt - mu).abs().flatten()
+                cov = ((std - std.mean()) * (err - err.mean())).mean()
+                denom = (std.std(unbiased=False) * err.std(unbiased=False)).clamp_min(1e-12)
+                dyn_calib = {"dyn/calib_corr": float(cov / denom),
+                             "dyn/calib_ratio": float(err.mean()
+                                                      / std.mean().clamp_min(1e-9)),
+                             "dyn/pred_std": float(std.mean())}
         else:
             dyn_loss = F.mse_loss(self.dynamics(z, a), z_next_tgt)
         # reward model predicts symlog(r) when model.symlog_reward is on;
@@ -470,7 +484,8 @@ class Trainer:
 
         out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss_val,
                "penalty/value": pen_val, "penalty/lambda": lam_t,
-               "loss/total": loss.item(), "step": self.step, **spec_metrics}
+               "loss/total": loss.item(), "step": self.step, **spec_metrics,
+               **dyn_calib}
         if self.lam0_auto is not None:
             out["penalty/lam0_auto"] = self.lam0_auto
         return out
