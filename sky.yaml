@@ -1,0 +1,38 @@
+# SkyPilot task — provider-agnostic GPU launch (PLAN.md compute split, Mode A/B).
+# Runs unchanged on AWS / GCP / Lambda / RunPod / Vast / Kubernetes; managed spot
+# jobs auto-recover from preemption, which checkpoint.resume=auto is built for
+# (checkpoints push to W&B artifacts; resume picks up the newest lineage).
+#
+#   pip install "skypilot[aws,gcp,lambda,runpod]"
+#   sky jobs launch sky.yaml --env WANDB_API_KEY \
+#       --env EXP=spectral_ladder --env ENV_NAME=halfcheetah --env SEED=0
+#
+# Sweep = one `sky jobs launch` per (env, seed); W&B groups by experiment.name
+# exactly as scripts/parallel_runs.py does locally. `sky launch -c mbrl ...`
+# instead for an interactive dev cluster (then `sky ssh mbrl`).
+
+name: mbrl-curvature
+
+resources:
+  accelerators: {A100:1, L4:1}   # any-of: A100 for MuJoCo suite, L4 fine for
+  use_spot: true                 # Pendulum-class (PLAN.md sec.1)
+  disk_size: 64
+
+workdir: .                       # syncs the repo (results/, checkpoints/ are
+                                 # gitignored locally; W&B is the rendezvous)
+
+envs:
+  WANDB_API_KEY: ""              # pass at launch: --env WANDB_API_KEY
+  EXP: spectral_ladder           # configs/experiment/<EXP>.yaml
+  ENV_NAME: halfcheetah          # configs/env/<ENV_NAME>.yaml
+  SEED: "0"
+
+setup: |
+  pip install -e ".[mujoco]"
+  python -c "import mbrl, gymnasium; print('mbrl + gymnasium import ok')"
+
+run: |
+  python scripts/train.py \
+    experiment=$EXP env=$ENV_NAME seed=$SEED \
+    checkpoint.resume=auto \
+    experiment.name=$EXP-$ENV_NAME
