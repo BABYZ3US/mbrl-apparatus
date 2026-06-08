@@ -1,0 +1,14 @@
+# THE SEAL — the complete runtime dependency set for remote execution.
+# Anything not in this file is dev-only (see pyproject [project.optional-
+# dependencies]) and must never be imported from src/mbrl or scripts/train*.
+# Pins match the environment the ledger results were produced in.
+torch==2.5.1
+numpy==2.2.6
+gymnasium[mujoco]==1.3.0
+hydra-core==1.3.2
+omegaconf==2.3.0
+wandb==0.27.2
+joblib==1.4.2
+# NOTE deliberately absent: matplotlib/seaborn/tensorboard/tqdm (analysis-side
+# only — figures are generated locally from W&B/JSONL, never inside training),
+# minari (offline-RL experiment only; install ad hoc), plotly/umap (viz extra).

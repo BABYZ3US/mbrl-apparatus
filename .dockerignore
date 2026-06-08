@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+checkpoints
+results
+wandb
+outputs
+notebooks
+docs
+tests
+.pytest_cache
+pytest-cache-files-*
+*.egg-info

@@ -1,6 +1,6 @@
 # Common entry points. All targets are safe to re-run (benchmarks are
 # cell-resumable; tests are hermetic).
-.PHONY: test test-all lint bench bridge recipe angle dashboard figures spectral-rl status ledger-check clean
+.PHONY: test test-all lint bench bridge recipe angle dashboard figures spectral-rl status ledger-check image seal-check clean
 
 test:              ## fast set (excludes @slow integration tests)
 	python -m pytest tests/ -q -m "not slow"
@@ -38,6 +38,15 @@ figures:
 spectral-rl:      ## the 5-arm spectral RL validation (GPU recommended)
 	python scripts/parallel_runs.py --preset colab_spectral \
 	    --overrides env=halfcheetah --seeds 0 1 2
+
+image:            ## sealed training image, tagged with the current sha
+	docker build -t mbrl-curvature:$$(git rev-parse --short HEAD) .
+
+seal-check:       ## training entrypoints must import only core deps
+	@! grep -nE "^(import|from) (matplotlib|seaborn|tensorboard|tqdm|plotly|umap)" \
+	    scripts/train.py scripts/train_multitask.py scripts/collect.py \
+	    src/mbrl/training/*.py src/mbrl/models/*.py src/mbrl/regularization/*.py \
+	    && echo "seal OK: training code imports core deps only"
 
 clean:            ## scratch outputs only — never touches results/ or checkpoints/
 	rm -rf outputs/parallel .pytest_cache pytest-cache-files-*

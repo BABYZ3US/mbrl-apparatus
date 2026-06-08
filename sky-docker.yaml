@@ -1,0 +1,27 @@
+# Sealed-image SkyPilot task (docs/remote_execution.md) — the remote-first
+# path. Unlike sky.yaml (workdir sync, dev mode), this runs the EXACT image
+# built from a commit: no clone drift, no dependency drift.
+#
+#   make image && docker push <registry>/mbrl-curvature:<sha>
+#   sky jobs launch sky-docker.yaml --env IMAGE_TAG=<sha> --env WANDB_API_KEY \
+#       --env EXP=champion --env ENV_NAME=halfcheetah --env SEED=0
+
+name: mbrl-sealed
+
+resources:
+  accelerators: {A100:1, L4:1}
+  use_spot: true                 # preemption-safe: W&B artifact resume
+  image_id: docker:REGISTRY/mbrl-curvature:${IMAGE_TAG}   # <- set registry
+
+envs:
+  IMAGE_TAG: latest
+  WANDB_API_KEY: ""
+  EXP: champion
+  ENV_NAME: halfcheetah
+  SEED: "0"
+
+run: |
+  cd /app
+  python scripts/train.py \
+    +experiment=$EXP env=$ENV_NAME seed=$SEED \
+    checkpoint.resume=auto experiment.name=$EXP-$ENV_NAME
