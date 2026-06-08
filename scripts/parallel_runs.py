@@ -45,6 +45,10 @@ for _name, _spec in _REG["presets"].items():
         _ovr += list(_arm.get("overrides", []))
         _arms.append((_arm["name"], _ovr))
     PRESETS[_name] = (_spec["script"], _arms)
+# back-compat: Colab is retired (2026-06-08) but ledger entries + the nightly
+# task reference the old preset names — alias colab_* -> gpu_*
+for _new in [k for k in PRESETS if k.startswith("gpu_")]:
+    PRESETS.setdefault(_new.replace("gpu_", "colab_"), PRESETS[_new])
 
 
 def build_commands(args) -> list[tuple[str, list[str]]]:

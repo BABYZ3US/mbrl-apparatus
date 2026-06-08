@@ -1,5 +1,11 @@
 # MBRL Testing Apparatus — Project Plan
 
+> **SUPERSEDED IN PART (2026-06-08):** the compute split below (Colab Pro GPU
+> + local CPU) is retired. Training/inference are cloud-only via the sealed
+> image (`docs/remote_execution.md`); local = tests, the supervised nightly
+> loop, and W&B log/artifact analysis. Sections on W&B rendezvous,
+> checkpointing, and Mode-B artifact flow remain accurate.
+
 Operational plan for the curvature-regularized MBRL project. The science lives in
 `../mbrl_foundations_and_framework.md`; this document covers the machinery: compute split,
 tooling, logging, snapshots, visualization, and the experiment pipeline.

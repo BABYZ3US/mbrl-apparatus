@@ -21,8 +21,10 @@ analysis, the nightly supervised loop). No more Colab-clone drift, no more
    not the machine.
 3. **Backend-agnostic = container + SkyPilot.** The image runs identically
    under `docker run` on any GPU box, `sky jobs launch` on 20+ providers, or
-   Kubernetes. Colab demotes to an interactive fallback (it cannot run our
-   image; its drift burned us twice — stale-clone batches on 06-07 and 06-08).
+   Kubernetes. Colab is RETIRED (2026-06-08): it cannot run the sealed image
+   and its clone drift burned two batches (06-07, 06-08). Training and
+   inference are cloud-only; local = tests, the supervised nightly loop, and
+   pulling W&B logs/artifacts for analysis.
 4. **Provenance in the image.** `.git` ships inside the container so
    sha-scoped results and `config_hash` lineages work unchanged remotely.
 

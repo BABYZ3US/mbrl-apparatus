@@ -36,14 +36,13 @@ refer to the founding doc's ledger.
   (smooth between-task interpolation — the generalization mechanism under test);
   its ablations are include_task=false and lam0=0. Entry: `scripts/train_multitask.py`.
 - `src/mbrl/utils/checkpoint.py` — atomic, RNG-complete resume; W&B artifact push.
-  The Colab-disconnect defense — keep resume bitwise-exact. Checkpoints are scoped
+  The preemption/disconnect defense — keep resume bitwise-exact. Checkpoints are scoped
   by config hash (`checkpoints/<run>/<hash>/`): a config change starts a fresh
   lineage under resume=auto (never crashes, old lineages preserved); only an
   explicit checkpoint path raises on hash mismatch.
 - `scripts/` — `train.py` (Hydra entry), `collect.py` (local CPU collectors),
   `local_sweep.py` (synthetic experiments, items 6–7), `make_figures.py`
 - `configs/` — Hydra: `base.yaml` + `env/` + `experiment/` (one per validation item)
-- `notebooks/colab_launcher.ipynb` — GPU side (Colab Pro)
 
 - `scripts/parallel_runs.py` — local grid launcher: one process per core, each run
   pinned to single-threaded math libs (OMP/MKL=1 — process-level parallelism, don't
@@ -69,12 +68,12 @@ python scripts/local_sweep.py --experiment stone --jobs 8   # no GPU needed
   if you add any RNG or stateful component to `Trainer`, add it to
   `state_dict`/`load_state_dict` or this test will (correctly) fail. This already
   caught the Hutchinson probe generator once.
-- `tests/test_smoke.py` is the gate before spending Colab time: full loop on
+- `tests/test_smoke.py` is the gate before spending GPU time: full loop on
   Pendulum, CPU, <1 min.
 
 ## Environment notes
 
-- Compute split: GPU (Colab Pro) = model/behaviour learning; local CPU (joblib) =
+- Compute split (2026-06-08, docs/remote_execution.md): cloud GPU via sealed image = ALL training/inference; local CPU =
   env collection, synthetic experiments, figures. Mode B syncs via W&B artifacts
   (project `mbrl-curvature`), never direct networking.
 - Local Mac (M2): **MPS does not work for this project** — the penalty's double
@@ -92,7 +91,7 @@ python scripts/local_sweep.py --experiment stone --jobs 8   # no GPU needed
   from either source (`make_figures.py --source local|wandb|auto`). If you add a
   logged metric that figures need, add it to KEYS in `scripts/make_figures.py`.
 - `torch>=2.4` assumed; plain `torch.autograd.grad` double-backward (no torch.func
-  dependency in the penalty — keep it that way for Colab version drift).
+  dependency in the penalty — keep it that way; deps are uv-locked).
 - Hydra writes job dirs under `outputs/` (gitignored); checkpoints under
   `checkpoints/` (gitignored; canonical copies are W&B artifacts).
 

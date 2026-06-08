@@ -94,7 +94,7 @@ header, note the plus) + CLI overrides (last wins).
 | training | `total_env_steps`, `steps_per_iter`, `model_updates_per_iter` | plots vs env steps, always |
 
 Presets: `configs/presets.yaml` (data, not code) → `parallel_runs.py --preset`.
-Current science preset: `colab_spectral` (5 arms). Experiment status:
+Current science preset: `gpu_spectral` (6 arms; colab_* names alias here). Experiment status:
 `make status`. Number/prose consistency: `make ledger-check`. Results are
 sha-scoped under `results/{bridge,bench}/<short-sha>/`.
 
@@ -104,8 +104,8 @@ sha-scoped under `results/{bridge,bench}/<short-sha>/`.
 2. Supervised iteration: `make recipe` / `make bridge` — closed-form, seconds
    per cell, resumable, sha-scoped. Record outcomes in the ledger WITH
    falsifiers; `make ledger-check` keeps prose honest.
-3. RL validation: `make spectral-rl` locally (Pendulum-class) or the same
-   preset on Colab/SkyPilot for MuJoCo. W&B groups by arm; `make dashboard`
+3. RL validation: `make spectral-rl` — cloud-only via the sealed image
+   (docs/remote_execution.md); Colab is retired. W&B groups by arm; `make dashboard`
    for the offline mirror; `make status` for "what's missing".
 4. Ledger adjudication: pre-registered criteria decide; claims move tiers.
 
@@ -169,7 +169,7 @@ the effective anneal — recheck doses per game like we re-dose per env.
 ## 6. Current evidence state (so the port doesn't cargo-cult)
 
 Validated supervised: ladder×poly (+33.7%), SNR-calibrated ladder (+48.3%).
-Pending RL: the 5-arm `colab_spectral` readout decides whether any of this
+Pending RL: the `gpu_spectral` readout decides whether any of this
 matters in the loop. Not supported: pointwise-positivity penalty (run 1),
 Wiener weights as penalty (run 4), σ=1 crossing hypothesis (measured 0.207),
 angle-as-cause (run 2b, −0.12 at fixed bandwidth). Untested: learned σ,

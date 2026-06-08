@@ -3,7 +3,7 @@
 Captures everything needed for bitwise-identical resume: module/optimizer state
 (via the trainer's state_dict protocol), lambda-schedule step, RNG states
 (torch/numpy/python), env step count, and a config hash that is verified on
-resume. Designed around Colab session death: save every `every` updates and on
+resume. Designed around session death / spot preemption: save every `every` updates and on
 SIGTERM; `resume="auto"` restores the newest checkpoint for the run.
 """
 from __future__ import annotations
@@ -121,7 +121,7 @@ class CheckpointManager:
         return max(cands, key=lambda p: int(p.stem.split("step")[1])) if cands else None
 
     def fetch_from_wandb(self, run_path: str, tag: str = "latest") -> Path:
-        """Mode-B: pull the newest checkpoint artifact (e.g. on Colab relaunch)."""
+        """Mode-B: pull the newest checkpoint artifact (e.g. on worker relaunch)."""
         import wandb
         api = wandb.Api()
         art = api.artifact(f"{run_path}:{tag}", type="checkpoint")

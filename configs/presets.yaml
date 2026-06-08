@@ -72,12 +72,12 @@ presets:
       - {name: sched-trace-chirp, overrides: [penalty.schedule.kind=sin2chirp,
                                               penalty.form=laplacian_trace]}
 
-  # GPU-lean Colab arms: fixed doses, no sweeps. Pass env via --overrides.
-  colab_recipe:
+  # GPU arms (cloud-only since 2026-06-08; Colab retired): fixed doses, no sweeps.
+  gpu_recipe:
     script: train.py
     arms:
       - {name: recipe, use: [recipe]}
-  colab_control:
+  gpu_control:
     script: train.py
     arms:
       - {name: control, overrides: [penalty.schedule.lam0=0,
@@ -85,12 +85,12 @@ presets:
                                     penalty.schedule.floor=0,
                                     smoothing.enabled=false,
                                     training.total_env_steps=200000]}
-  colab_estimator:
+  gpu_estimator:
     script: train.py
     arms:
       - {name: est-frobenius, use: [recipe]}
       - {name: est-trace, use: [recipe], overrides: [penalty.form=laplacian_trace]}
-  colab_schedule_final:
+  gpu_schedule_final:
     script: train.py
     arms:
       - {name: sched-step-champ, use: [recipe]}
@@ -101,7 +101,7 @@ presets:
                                              +penalty.schedule.total_steps=40000,
                                              training.total_env_steps=200000]}
 
-  colab_multitask_wide:
+  gpu_multitask_wide:
     script: train_multitask.py
     arms:
       - {name: mtw-reg, use: [mtw]}
@@ -116,7 +116,7 @@ presets:
   # NOTE: jobs launch in arm order and queue behind busy workers — the
   # arms you care about most go FIRST (champion's absence in two batches
   # was queue position, not failure).
-  colab_spectral:
+  gpu_spectral:
     script: train.py
     arms:
       - {name: champion, use: [spec], overrides: [+experiment=champion]}

@@ -129,7 +129,7 @@ format), W&B per-modality dashboards, multimodal presets, pipeline.md v2.
 
 ## 4. Compute plan
 
-Phases 1–2 are A100-class (Colab Pro or sky.yaml — conv VAEs and the
+Phases 1–2 are A100-class (sealed image via sky-docker.yaml — conv VAEs and the
 transformer end the CPU-parity era; the M2 keeps the supervised harness and
 nightly research loop). Budget estimate: Phase 1 ~10 GPU-h (3 seeds × 2
 arms), Phase 2 ~20 GPU-h (3×3), Phase 3 ~40 GPU-h. Checkpoint/resume and

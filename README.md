@@ -24,15 +24,7 @@ GENERATED sealed runtime export (never hand-edit — `make lock` regenerates).
 Version bumps are experiments: re-lock deliberately, rerun `make test-all` +
 the mlp-recipe anchor, commit lock + evidence together.
 
-## Setup (Colab)
-
-Open `notebooks/colab_launcher.ipynb` in Colab (Pro, A100 runtime), add your
-`WANDB_API_KEY` to Colab Secrets, run all cells. Sessions are disposable:
-checkpoints auto-push to W&B and `checkpoint.resume=auto` continues on relaunch.
-Checkpoint lineages are scoped by config hash — a config change starts fresh
-instead of resuming stale weights.
-
-## Setup (any cloud, provider-agnostic)
+## Setup (cloud — the ONLY training path)
 
 ```bash
 pip install "skypilot[aws,gcp,lambda,runpod]"
@@ -86,12 +78,12 @@ python scripts/train.py +experiment=spectral_auto env=halfcheetah seed=0
 python scripts/train.py +experiment=multienv env=walker2d seed=0
 
 # THE spectral RL validation (5 arms: learned/auto/fixed ladder/single/MLP anchor)
-python scripts/parallel_runs.py --preset colab_spectral --overrides env=halfcheetah --seeds 0 1 2
+python scripts/parallel_runs.py --preset gpu_spectral --overrides env=halfcheetah --seeds 0 1 2
 
 # original-recipe arms (fixed doses from docs/original_findings_report.md)
-python scripts/parallel_runs.py --preset colab_recipe --overrides env=halfcheetah --seeds 0 1 2 --jobs 3
-python scripts/parallel_runs.py --preset colab_control --overrides env=walker2d --seeds 0 --jobs 1
-python scripts/parallel_runs.py --preset colab_estimator --overrides env=halfcheetah --seeds 0 1 2 --jobs 3
+python scripts/parallel_runs.py --preset gpu_recipe --overrides env=halfcheetah --seeds 0 1 2 --jobs 3
+python scripts/parallel_runs.py --preset gpu_control --overrides env=walker2d --seeds 0 --jobs 1
+python scripts/parallel_runs.py --preset gpu_estimator --overrides env=halfcheetah --seeds 0 1 2 --jobs 3
 
 # local CPU science, no GPU needed (validation items 6-7)
 python scripts/local_sweep.py --experiment stone --jobs 8
@@ -103,7 +95,7 @@ python scripts/parallel_runs.py --preset schedule_ablation --seeds 0 1 2 --jobs 
 
 # multi-task zero-shot generalization (item 9)
 python scripts/train_multitask.py                                # PendulumTarget, local
-python scripts/train_multitask.py env=halfcheetah_vel            # Colab
+python scripts/train_multitask.py env=halfcheetah_vel            # cloud
 python scripts/train_multitask.py penalty.schedule.lam0=0        # ablation arm
 
 # Mode-B collection on local cores -> W&B artifact

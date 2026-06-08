@@ -36,7 +36,7 @@ figures:
 	python scripts/make_figures.py
 
 spectral-rl:      ## the 5-arm spectral RL validation (GPU recommended)
-	python scripts/parallel_runs.py --preset colab_spectral \
+	python scripts/parallel_runs.py --preset gpu_spectral \
 	    --overrides env=halfcheetah --seeds 0 1 2
 
 lock:             ## re-resolve deps + regenerate the sealed export (DELIBERATE

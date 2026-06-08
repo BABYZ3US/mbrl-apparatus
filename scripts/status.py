@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "results" / "runs"
 CKPTS = ROOT / "checkpoints"
 
-# arms the ledger is waiting on (colab_spectral, the spectral RL validation)
+# arms the ledger is waiting on (gpu_spectral, the spectral RL validation)
 PENDING_VALIDATION = ("spec-ladder", "spec-single", "spec-auto",
                       "spec-learned", "mlp-recipe")
 
@@ -76,7 +76,7 @@ def main():
     if missing:
         print(f"\nledger-pending spectral validation, arms with NO runs yet: "
               f"{', '.join(missing)}")
-        print("  -> python scripts/parallel_runs.py --preset colab_spectral "
+        print("  -> python scripts/parallel_runs.py --preset gpu_spectral "
               "--overrides env=halfcheetah --seeds 0 1 2")
 
 
