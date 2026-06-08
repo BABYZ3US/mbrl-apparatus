@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ..models import (Encoder, EMAEncoder, AffineDynamics,
+from ..models import (Encoder, EMAEncoder, VAEEncoder, AffineDynamics,
                       GaussianAffineDynamics, FullMLPDynamics, RewardModel,
                       Policy, ValueFn)
 from ..models.reward import symlog, symexp
@@ -39,7 +39,13 @@ class Trainer:
         cap_mult = int(cfg.model.get("latent_cap_mult", 4))
         k = min(cfg.model.latent_dim, cap_mult * obs_dim)
         h, d = cfg.model.hidden, cfg.model.depth
-        self.encoder = Encoder(obs_dim, k, h, d).to(device)
+        # encoder: "mlp" (deterministic, default) or "vae" (run 10 —
+        # recon + KL grounding; latent near-stationary under the KL pull)
+        self.enc_vae = str(cfg.model.get("encoder", "mlp")) == "vae"
+        enc_cls = VAEEncoder if self.enc_vae else Encoder
+        self.encoder = enc_cls(obs_dim, k, h, d).to(device)
+        self.vae_beta = float(cfg.model.get("vae", {}).get("beta", 1e-3))
+        self.vae_recon_w = float(cfg.model.get("vae", {}).get("recon_weight", 1.0))
         self.ema = EMAEncoder(self.encoder, cfg.model.ema_decay)
         # dynamics: "affine" (deterministic) or "gaussian" (state probability
         # transitions, user 2026-06-08 — mean stays affine in action so the
@@ -266,6 +272,7 @@ class Trainer:
                 self.spec_sigma = ladder
                 self.spec_heads = self._build_spec_heads(ladder)
                 self.spec_snr_ema = [None] * self.spec_nheads
+                self.spec_recal_rebuilds = getattr(self, "spec_recal_rebuilds", 0) + 1
         for i, head in enumerate(self.spec_heads):
             if self.spec_weights_mode == "snr":
                 theta, info = snr_band_weights(
@@ -306,7 +313,13 @@ class Trainer:
         else:
             obs, a, r, obs_next = (x.to(self.device) for x in batch)
             tau = None
-        z = self.encoder(obs)
+        vae_terms = None
+        if self.enc_vae:   # one forward: recon + KL + the z sample
+            recon, kl, z = self.encoder.losses(obs)
+            vae_terms = self.vae_recon_w * recon + self.vae_beta * kl
+            vae_metrics = {"vae/recon": recon.item(), "vae/kl": kl.item()}
+        else:
+            z = self.encoder(obs)
         with torch.no_grad():
             z_next_tgt = self.ema(obs_next)
 
@@ -382,6 +395,8 @@ class Trainer:
                             "spectral/fitted": float(self.spec_refits > 0)}
             if self.spec_sigma_star is not None:
                 spec_metrics["spectral/sigma_star"] = self.spec_sigma_star
+                spec_metrics["spectral/recal_rebuilds"] = getattr(
+                    self, "spec_recal_rebuilds", 0)
             if self.spec_sigma == "learned" and self.spec_heads:
                 with torch.no_grad():   # effective per-block sigmas, head 0
                     h0 = self.spec_heads[0]
@@ -480,6 +495,9 @@ class Trainer:
                 spec_metrics["spectral/aux_loss"] = aux.item()
         else:
             loss = dyn_loss + rew_loss + lam_t * pen  # original op order (bitwise)
+        if vae_terms is not None:   # run 10: recon + KL grounding
+            loss = loss + vae_terms
+            spec_metrics |= vae_metrics
         if self.spec_enabled:   # collapse early-warning, ~free
             spec_metrics["latent/z_std"] = z.detach().std(0).mean().item()
 

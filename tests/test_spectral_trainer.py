@@ -321,3 +321,33 @@ def test_encoder_aux_grounds_encoder_in_spectral_mode():
     assert "spectral/aux_loss" in on and np.isfinite(on["spectral/aux_loss"])
     assert "spectral/aux_loss" not in off
     assert d_on > d_off    # reward gradient reaches the encoder
+
+
+def test_vae_encoder_run10_smoke():
+    """encoder=vae: recon+KL train alongside the champion stack; EMA targets
+    are deterministic (mu); metrics expose vae/recon + vae/kl; recon falls."""
+    torch.manual_seed(0)
+    cfg = make_cfg(sigma_w="auto", n_features=64)
+    cfg.model.encoder = "vae"
+    cfg.model.dynamics = "gaussian"
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    from mbrl.models import VAEEncoder
+    assert isinstance(t.encoder, VAEEncoder)
+    assert t.ema.ema.deterministic is True       # mu targets, no noise leak
+    recons = []
+    for i in range(10):
+        m = t.model_update(fake_batch(seed=900 + i))
+        assert np.isfinite(m["loss/total"])
+        if "vae/recon" in m:
+            recons.append(m["vae/recon"])
+    assert len(recons) >= 8 and np.isfinite(recons).all()
+    assert recons[-1] < recons[0]                # reconstruction is learning
+    # checkpoint roundtrip carries the decoder
+    sd = t.state_dict()
+    t2 = Trainer(cfg, obs_dim=3, action_dim=1)
+    t2.load_state_dict(sd)
+    x = torch.randn(4, 3)
+    mu1, lv1 = t.encoder.moments(x)
+    mu2, lv2 = t2.encoder.moments(x)
+    assert torch.allclose(mu1, mu2) and torch.allclose(lv1, lv2)
+    assert torch.allclose(t.encoder.decoder(mu1), t2.encoder.decoder(mu2))

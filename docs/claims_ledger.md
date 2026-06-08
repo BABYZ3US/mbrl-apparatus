@@ -291,6 +291,30 @@ architecture iteration).**
   noise-injection arm to separate rsample-averaging from logvar-damping as
   the variance mechanism.
 
+**Runs 10–11 (2026-06-08, PRE-REGISTERED — the VAE/transformer generation,
+user-proposed).**
+- **Run 10 — VAE encoder (`vae_ablation` preset: champ-vae vs champion-ctl,
+  HalfCheetah 200K, ≥3 seeds).** Hypotheses: recon+KL grounding makes encoder
+  collapse structurally impossible AND the KL pull toward N(0,I) makes the
+  latent near-stationary, so the spectral basis stops chasing a moving
+  coordinate system. Criteria: (a) return parity or better vs champion-ctl;
+  (b) STATIONARITY: spectral/sigma_star drift and spectral/recal_rebuilds
+  collapse vs control; (c) z_std healthy. Risk on record: reconstruction
+  wants reward-irrelevant detail in the latent (against the 1×-cap lesson) —
+  β=1e-3 + encoder_aux kept on for parity; β sweep only if (a) fails.
+  FALSIFIER: return tax > seed noise with no stationarity gain ⇒ VAE retired
+  for state-based tasks (revisit at pixels). RESULTS: pending.
+- **Run 11 — transformer dynamics on (μ,σ) tokens (design locked, build
+  gated on run 10's winner).** Tokens = the per-step normal map (μ_t, σ_t)
+  plus action; causal transformer over the time sequence predicts the next
+  normal map (decoder = MLP head over state-vector params; the
+  transposed-conv "normal map" decoder is reserved for the PIXEL variant —
+  deconvolution presumes spatial structure the 17-dim state lacks). Criteria
+  to fix at build time: return, imagined-variance, calibration, R15 check at
+  cheetah scale, and ≥1 memory-dependent task (the Markov-failure regime is
+  the predicted payoff; without it the transformer is pure overhead at 200K
+  steps). One change at a time: run 11 builds on run 10's winning encoder.
+
 **Spectral encoder-collapse rule (2026-06-08, from the first HalfCheetah
 batch):** in spectral mode the encoder's only gradient was the dynamics MSE
 (reward cache and behaviour z0 are detached by design), whose trivial solution

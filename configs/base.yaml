@@ -9,6 +9,15 @@ experiment:
   name: dev
 
 model:
+  encoder: mlp          # mlp (deterministic) | vae (run 10: recon + KL ground
+                        # the encoder — collapse structurally impossible; KL
+                        # pull toward N(0,I) makes the latent near-stationary
+                        # so sigma* stops drifting). Decoder = MLP (state obs);
+                        # transposed-conv "normal map" decoder reserved for
+                        # the pixel-task variant.
+  vae:
+    beta: 1.0e-3        # KL weight (small: regularize, don't strangle)
+    recon_weight: 1.0
   dynamics: affine      # affine (deterministic) | gaussian (state probability
                         # transitions p(z'|z,a) = N(mu, diag(sigma^2)); mean
                         # stays affine in action so R15's zero action-curvature

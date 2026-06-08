@@ -138,3 +138,10 @@ presets:
       - {name: dyn-affine, overrides: [model.dynamics=affine, training.total_env_steps=20000]}
       - {name: dyn-gaussian, overrides: [model.dynamics=gaussian, training.total_env_steps=20000]}
       - {name: dyn-mlp, overrides: [model.dynamics=mlp, training.total_env_steps=20000]}
+
+  # Run 10 (pre-registered): VAE encoder vs the champion control. One change.
+  vae_ablation:
+    script: train.py
+    arms:
+      - {name: champ-vae, use: [spec], overrides: [+experiment=champion_vae]}
+      - {name: champion-ctl, use: [spec], overrides: [+experiment=champion]}

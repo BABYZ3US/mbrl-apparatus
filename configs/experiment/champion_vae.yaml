@@ -1,0 +1,25 @@
+# @package _global_
+# Run 10 arm: the champion with a VAE encoder (recon + KL grounding).
+# Hypotheses vs champion control: (a) no return tax; (b) sigma* drift and
+# recal_rebuilds collapse (stationary latent); (c) z_std healthy without
+# leaning on the encoder_aux hack (aux kept ON for parity; the aux-off
+# ablation is a follow-up, not this run).
+experiment:
+  name: champion_vae
+model:
+  encoder: vae
+  dynamics: gaussian
+  latent_cap_mult: 1
+penalty:
+  schedule:
+    kind: cuberoot
+    floor: 1.0e-5
+spectral:
+  enabled: true
+  sigma_w: auto
+  cal_mults: [0.5, 1.0, 2.0, 4.0]
+  recal_every: 50
+  poly:
+    degrees: [1, 3]
+    coefs: [0.1, 10.0]
+    shifts: [0, 0]
