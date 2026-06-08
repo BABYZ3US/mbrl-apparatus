@@ -3,6 +3,8 @@ name = "mbrl-curvature"
 version = "0.1.0"
 description = "Curvature-regularized latent model-based RL (Hutchinson HVP Hessian penalty)"
 requires-python = ">=3.10"
+# CORE = the sealed runtime (docs/remote_execution.md): training code may
+# import these and ONLY these (make seal-check enforces).
 dependencies = [
     "torch>=2.4",
     "numpy>=1.26",
@@ -11,14 +13,12 @@ dependencies = [
     "omegaconf>=2.3",
     "wandb>=0.18",
     "joblib>=1.4",
-    "matplotlib>=3.8",
-    "seaborn>=0.13",
-    "tensorboard>=2.16",
-    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
 mujoco = ["gymnasium[mujoco]>=1.0", "minari>=0.5"]
+# analysis-side only — figures/dashboards run locally, never inside training
+analysis = ["matplotlib>=3.8", "seaborn>=0.13", "tensorboard>=2.16", "tqdm>=4.66"]
 viz = ["plotly>=5.20", "umap-learn>=0.5", "torchinfo>=1.8"]
 dev = ["pytest>=8.0", "pytest-xdist>=3.5"]
 
@@ -28,6 +28,19 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv]
+# The lock reproduces the environment every ledger result was produced in
+# (2026-06-08). Version bumps are EXPERIMENTS: re-lock deliberately, re-run
+# make test-all + the apparatus regression (mlp-recipe anchor), then commit
+# the new lock with that evidence — never drift implicitly.
+constraint-dependencies = [
+    "torch==2.5.1",
+    "numpy==2.2.6",
+    "gymnasium==1.3.0",
+    "wandb==0.27.2",
+    "joblib==1.4.2",
+]
 
 [tool.pytest.ini_options]
 markers = ["slow: integration tests (full env loops); excluded by make test, run by make test-all"]

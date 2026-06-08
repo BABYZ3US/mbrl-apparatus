@@ -1,6 +1,6 @@
 # Common entry points. All targets are safe to re-run (benchmarks are
 # cell-resumable; tests are hermetic).
-.PHONY: test test-all lint bench bridge recipe angle dashboard figures spectral-rl status ledger-check image seal-check clean
+.PHONY: test test-all lint bench bridge recipe angle dashboard figures spectral-rl status ledger-check image seal-check lock sync clean
 
 test:              ## fast set (excludes @slow integration tests)
 	python -m pytest tests/ -q -m "not slow"
@@ -38,6 +38,14 @@ figures:
 spectral-rl:      ## the 5-arm spectral RL validation (GPU recommended)
 	python scripts/parallel_runs.py --preset colab_spectral \
 	    --overrides env=halfcheetah --seeds 0 1 2
+
+lock:             ## re-resolve deps + regenerate the sealed export (DELIBERATE
+	uv lock        ## act: rerun test-all + the mlp-recipe anchor before committing)
+	uv export --extra mujoco --no-default-groups --no-emit-project \
+	    --no-hashes --format requirements.txt -o requirements-core.txt
+
+sync:             ## local dev env from the lock (exact, incl. analysis+dev)
+	uv sync --extra mujoco --extra analysis --extra dev
 
 image:            ## sealed training image, tagged with the current sha
 	docker build -t mbrl-curvature:$$(git rev-parse --short HEAD) .

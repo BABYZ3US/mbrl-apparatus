@@ -11,11 +11,18 @@ equations: `docs/architecture.svg`. Related work for the spectral stack:
 
 ```bash
 cd mbrl
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,viz]"          # add ,mujoco] on machines with MuJoCo
+make sync          # uv: exact env from uv.lock — interpreter pinned by
+                   # .python-version (3.11), no runtime mismatch possible
+source .venv/bin/activate
 wandb login                          # academic account on the .edu email
 make test                            # verify the penalty math before anything else
 ```
+
+Dependency system: pyproject.toml stays the manifest; uv.lock is the
+cross-platform exact resolution (committed); requirements-core.txt is the
+GENERATED sealed runtime export (never hand-edit — `make lock` regenerates).
+Version bumps are experiments: re-lock deliberately, rerun `make test-all` +
+the mlp-recipe anchor, commit lock + evidence together.
 
 ## Setup (Colab)
 

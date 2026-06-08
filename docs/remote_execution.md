@@ -28,8 +28,10 @@ analysis, the nightly supervised loop). No more Colab-clone drift, no more
 
 ## 2. The pieces (this commit)
 
-- `requirements-core.txt` — the sealed dependency list, pins matching the
-  environment all ledger results were produced in.
+- `requirements-core.txt` — the sealed runtime export, GENERATED from uv.lock
+  by `make lock` (pyproject = manifest, uv.lock = exact cross-platform
+  resolution constrained to the ledger-validated versions, .python-version
+  pins the interpreter at 3.11 — runtime mismatch is structurally closed).
 - `Dockerfile` — python:3.11-slim + core deps + repo; headless MuJoCo
   (MUJOCO_GL=osmesa); non-root; entrypoint `train.py checkpoint.resume=auto`.
 - `sky-docker.yaml` — SkyPilot task pinned to the image (vs sky.yaml's
