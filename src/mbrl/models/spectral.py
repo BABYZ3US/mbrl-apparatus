@@ -159,6 +159,59 @@ class RationalSpectralReward:
             return 1.0 / self._den_raw(X).abs().clamp_min(1e-6)
 
 
+def orthogonalize_features(sr: "SpectralReward") -> "SpectralReward":
+    """Run-12 candidate A — Orthogonal Random Features (Yu et al. 2016;
+    GORF variants): within each d-row chunk, replace the iid Gaussian
+    directions by a uniform orthogonal frame (QR of a fresh Gaussian) while
+    keeping chi-distributed row norms — unbiased for the same kernel with
+    strictly lower variance in the known regimes. Drop-in, zero
+    hyperparameters; per-row norms are preserved EXACTLY, so the sigma
+    ladder, poly band weights, and w2/w4 bookkeeping are untouched."""
+    g = torch.Generator()
+    g.set_state(sr._orf_gen_state)
+    W = sr.W.clone()
+    d = sr.in_dim
+    row = 0
+    while row < sr.M:
+        m = min(d, sr.M - row)
+        block = W[row:row + m]
+        norms = block.norm(dim=-1, keepdim=True)          # keep these exactly
+        G = torch.randn(d, d, generator=g)
+        Q, _ = torch.linalg.qr(G)                          # uniform orthogonal
+        W[row:row + m] = norms * Q[:m]
+        row += m
+    sr.W = W
+    sr.w2 = W.pow(2).sum(-1)
+    sr.w4 = sr.w2.pow(2)
+    return sr
+
+
+def shrink_coefs(sr: "SpectralReward", X: Tensor, y: Tensor,
+                 weights: Tensor) -> "SpectralReward":
+    """Run-12 candidate B — Donoho–Johnstone-style per-COEFFICIENT shrinkage
+    on top of the ridge fit. The poly weights act per-band; wavelet shrinkage
+    theory says per-coefficient soft-thresholding at the universal threshold
+    tau_j = sd_j * sqrt(2 log M) is near-minimax across smoothness classes.
+    Per-coefficient noise sd via split-half refits (the run-4 machinery):
+    fit on each half, sd_j = |c_A - c_B| / 2. Mirrors the math project's
+    incremental-filtration lesson: keep coefficients whose signal exceeds
+    their own measured noise, not a global dose."""
+    X = torch.as_tensor(X, dtype=torch.float32)
+    y = torch.as_tensor(y, dtype=torch.float32)
+    n = len(y)
+    half = n // 2
+    cs = []
+    for sl in (slice(0, half), slice(half, None)):
+        Phi = sr.features(X[sl])
+        A = Phi.T @ Phi + torch.diag(weights / 2 + 1e-8)   # half data, half dose
+        cs.append(torch.linalg.solve(A, Phi.T @ y[sl]))
+    sd = (cs[0] - cs[1]).abs() / 2.0
+    tau = sd * math.sqrt(2.0 * math.log(sr.M))
+    with torch.no_grad():
+        sr.c = torch.sign(sr.c) * (sr.c.abs() - tau).clamp_min(0.0)
+    return sr
+
+
 def snr_band_weights(Phi: Tensor, y: Tensor, omega_norms: Tensor,
                      n_bands: int = 8, snr_clip: tuple = (1e-3, 1e3),
                      generator: "torch.Generator | None" = None):
@@ -319,6 +372,7 @@ class SpectralReward:
                 W[k * blk: n_features if k == K - 1 else (k + 1) * blk] *= sig
         self.W = W.to(self.device)
         self.b = (2.0 * math.pi * torch.rand(n_features, generator=g)).to(self.device)
+        self._orf_gen_state = g.get_state()   # continue the stream if orf'd
         # learn_scales (user, 2026-06-08): no manual clamp/calibration — the
         # ladder values become INITIAL scales and per-block log-scales are
         # trained by gradient through the cos features on the reward fit

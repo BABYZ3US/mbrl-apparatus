@@ -291,6 +291,22 @@ architecture iteration).**
   noise-injection arm to separate rsample-averaging from logvar-damping as
   the variance mechanism.
 
+**Run 12 (2026-06-08, research-loop cycle 1 — approximation-theory
+candidates): both NOT SUPPORTED; champion stands.** Candidate A, orthogonal
+random features (Yu et al. 2016 — unbiased, lower variance, norms preserved
+so ladder/poly untouched): 12/20 wins but mean +1.1% (bar: > +2%) with a
+−21.0% worst cell (bar: > −20%) — a real but sub-threshold effect, the
+variance reduction does not survive validation-sweep selection at M=512.
+Candidate B, Donoho–Johnstone universal-threshold shrinkage: DROPPED PRE-RUN
+with the failure mode pinned by a test — DJ requires an orthonormal basis;
+in the correlated RFF design, cancellation pairs ring when one side is
+zeroed (MSE 0.05 → 178 on the planted case). Third instance of the same
+meta-lesson (runs 4, 6/8, 12B): per-component statistics demand an
+orthogonalized or incremental measurement frame. Cycle-2 queue: leverage-
+score feature sampling (Bach 2017 line), shrinkage in the Φ-SVD basis
+(adaptive TSVD / Rosasco spectral filtering — the theoretically correct
+form of B).
+
 **Runs 10–11 (2026-06-08, PRE-REGISTERED — the VAE/transformer generation,
 user-proposed).**
 - **Run 10 — VAE encoder (`vae_ablation` preset: champ-vae vs champion-ctl,

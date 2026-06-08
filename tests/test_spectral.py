@@ -183,3 +183,44 @@ def test_rational_head_recovers_planted_rational():
     score_c = rr.resonance_score(c0.unsqueeze(0)).item()
     score_r = rr.resonance_score(Xte[:256]).mean().item()
     assert score_c > score_r
+
+
+def test_orf_preserves_norms_and_orthogonalizes():
+    """ORF: row norms preserved exactly (ladder/bands untouched); within-chunk
+    directions orthogonal; predictions still finite and fit works."""
+    from mbrl.models.spectral import orthogonalize_features
+
+    sr = SpectralReward(4, 64, [0.25, 0.5, 1.0, 2.0], seed=0)
+    norms_before = sr.w2.sqrt().clone()
+    sr = orthogonalize_features(sr)
+    assert torch.allclose(sr.w2.sqrt(), norms_before, atol=1e-5)
+    D = sr.W[:4] / sr.W[:4].norm(dim=-1, keepdim=True)   # first chunk dirs
+    off = (D @ D.T - torch.eye(4)).abs().max()
+    assert off < 1e-5
+    X = torch.randn(256, 4, generator=torch.Generator().manual_seed(1))
+    sr.fit(X, X.sum(-1), lam=1e-3)
+    assert torch.isfinite(sr.predict(X)).all()
+
+
+def test_shrink_coefs_rings_in_correlated_basis():
+    """DOCUMENTED FAILURE (run 12 candidate B, dropped before running): DJ
+    universal-threshold shrinkage requires an ORTHONORMAL basis. In the
+    correlated RFF design, cancellation pairs are everywhere — zeroing one
+    side leaves the partner ringing. This test pins the failure mode so the
+    candidate isn't re-proposed naively; the correct form (shrinkage in the
+    Phi-SVD basis = adaptive TSVD, Rosasco spectral filtering) is cycle-2."""
+    from mbrl.models.spectral import shrink_coefs
+
+    g = torch.Generator().manual_seed(0)
+    X = torch.randn(2048, 3, generator=g)
+    y_clean = torch.sin(X[:, 0])
+    y = y_clean + 1.0 * torch.randn(len(X), generator=g)
+    sr = SpectralReward(3, 256, [0.5, 1.0], seed=0)
+    w = 1e-3 * sr.w4
+    sr.fit(X, y, weights=w)
+    mse_before = torch.mean((sr.predict(X) - y_clean) ** 2).item()
+    sr = shrink_coefs(sr, X, y, w)
+    nz = int((sr.c.abs() > 1e-10).sum())
+    mse_after = torch.mean((sr.predict(X) - y_clean) ** 2).item()
+    assert nz < 256                       # it does shrink...
+    assert mse_after > mse_before * 2     # ...and RINGS: the documented failure
