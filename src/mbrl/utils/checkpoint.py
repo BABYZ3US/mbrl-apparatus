@@ -27,7 +27,7 @@ def config_hash(cfg_dict: dict) -> str:
 class CheckpointManager:
     def __init__(self, dirpath: str | Path, cfg_dict: dict, every: int = 2000,
                  keep_last: int = 3, milestone_every: int | None = 100_000,
-                 wandb_run=None):
+                 wandb_run=None, results_root=None, run_name: str | None = None):
         self.hash = config_hash(cfg_dict)
         # Scope by config hash: a config change starts a FRESH checkpoint lineage
         # instead of colliding with (or crashing on) checkpoints from an older
@@ -36,6 +36,11 @@ class CheckpointManager:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.every, self.keep_last, self.milestone_every = every, keep_last, milestone_every
         self.wandb_run = wandb_run
+        # F1: record each checkpoint into the run's stdlib artifact manifest
+        # (results_root/runs/<run_name>/artifacts.json) so the Studio's pull.artifacts
+        # can see it WITHOUT calling the W&B API (the seal). None => no manifest.
+        self.results_root = results_root
+        self.run_name = run_name
         self._best = -float("inf")
         self._install_sigterm = False  # set True in scripts; not in notebooks/tests
 
@@ -75,6 +80,18 @@ class CheckpointManager:
                                            "cfg_hash": self.hash})
             art.add_file(str(path))
             self.wandb_run.log_artifact(art)
+        if self.results_root and self.run_name:
+            try:
+                from mbrl.studio.artifacts import record_artifact
+                record_artifact(self.results_root, self.run_name, {
+                    "name": (f"model-{self.wandb_run.id}" if self.wandb_run
+                             else f"ckpt-{self.run_name}"),
+                    "type": "checkpoint", "tag": tag, "env_steps": env_steps,
+                    "cfg_hash": self.hash, "path": str(path),
+                    "uri": (f"wandb://{self.wandb_run.id}" if self.wandb_run else None),
+                })
+            except Exception:  # noqa: BLE001 — manifest is best-effort, never break ckpt
+                pass
         return path
 
     def _gc(self):
