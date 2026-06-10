@@ -51,6 +51,7 @@ from mbrl.studio import spec_to_overrides, write_experiment_yaml, run_name_for_s
 from mbrl.studio.run_index import RunIndex  # noqa: E402
 from mbrl.studio.surface_index import SurfaceIndex  # noqa: E402
 from mbrl.studio.cells_index import CellsIndex  # noqa: E402
+from mbrl.studio.diagnostics_index import DiagnosticsIndex  # noqa: E402
 from mbrl.studio.sweep import plan_sweep  # noqa: E402
 from mbrl.studio.spec_validator import validate_spec  # noqa: E402
 # Incremental SQLite metric reader (stdlib sqlite3, inside the seal). Preferred over
@@ -78,6 +79,7 @@ PULL_ARTIFACTS = "pull.artifacts"  # F1: per-run artifact manifest
 PULL_SURFACE = "pull.surface"     # v0.1
 SUBMIT_SWEEP = "submit.sweep"     # v0.1
 PULL_SWEEP = "pull.sweep"         # sweep cells: catalog or flattened arm-rows
+PULL_DIAGNOSTICS = "pull.diagnostics"  # PCA/CV reports: catalog or named payload
 PULL_RUN_STATUS = "pull.run_status"   # launch/monitor seam
 PULL_LAUNCHED = "pull.launched"
 PULL_LOG = "pull.log"
@@ -431,6 +433,14 @@ class StudioBridgeServer:
             return make(PULL_SURFACE, surf, id_)
         if type_ == SUBMIT_SWEEP:
             return make(SUBMIT_SWEEP, self.submit_sweep(data), id_)
+        if type_ == PULL_DIAGNOSTICS:
+            # diagnostics artifacts (results/diagnostics/*.json, scripts/diagnose.py):
+            # no name -> the catalog; a name -> that report's full payload.
+            didx = DiagnosticsIndex(self.results_dir.parent)
+            report = str(data.get("name", "") or "")
+            if not report:
+                return make(PULL_DIAGNOSTICS, {"items": didx.list_reports()}, id_)
+            return make(PULL_DIAGNOSTICS, didx.get_report(report), id_)
         if type_ == PULL_SWEEP:
             # sweep OUTCOME grids (results/*_cells.jsonl — NOT time-series): no name
             # asked → the catalog; a name → that sweep's flattened arm-rows. The
