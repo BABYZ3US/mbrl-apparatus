@@ -7,6 +7,22 @@ tier — read before stating any claim). Architecture diagram with the closed-fo
 equations: `docs/architecture.svg`. Related work for the spectral stack:
 `docs/related_work_spectral.md`. Roadmap: `docs/improvement_plan.md`.
 
+## The Studio seam
+
+The desktop workbench (`../godot_studio/`) drives this apparatus over ONE TCP
+boundary: `scripts/studio_bridge_server.py` (127.0.0.1:9009, length-prefixed
+JSON; 16 served verbs, SSOT `src/mbrl/studio/protocol.py`, conformance-tested
+on both sides). The server launches `scripts/train.py` runs as subprocesses and
+reads results off disk — no torch crosses the wire. Intended use end-to-end:
+`../godot_studio/docs/USER_GUIDE.md`.
+
+Diagnostics artifacts for the Studio's Diagnostics panel:
+
+```bash
+python scripts/diagnose.py --source <data.jsonl> --features <keys> \
+    --target <key> --name <report>     # -> results/diagnostics/<report>.json
+```
+
 ## Setup (local)
 
 ```bash
