@@ -24,3 +24,25 @@ def lambda_returns(rewards: Tensor, values: Tensor, gamma: float, lam: float) ->
         last = rewards[t] + gamma * ((1 - lam) * values[t + 1] + lam * last)
         out[t] = last
     return out
+
+
+def gae_advantages(rewards: Tensor, values: Tensor, gamma: float,
+                   lam: float) -> tuple[Tensor, Tensor]:
+    """Generalized Advantage Estimation (Schulman et al. 2016) — the battle-tested
+    advantage estimator (PPO/A2C standard), here over imagined rollouts.
+
+    A_t = sum_l (gamma*lam)^l * delta_{t+l},  delta_t = r_t + gamma v_{t+1} - v_t.
+
+    rewards: (H, B); values: (H+1, B) with the bootstrap last.
+    Returns (advantages, returns), both (H, B); returns = advantages + values[:-1]
+    (the value-regression target). lam=1 recovers discounted Monte-Carlo minus
+    baseline; lam=0 the one-step TD residual.
+    """
+    H = rewards.shape[0]
+    adv = torch.empty_like(rewards)
+    last = torch.zeros_like(rewards[0])
+    for t in reversed(range(H)):
+        delta = rewards[t] + gamma * values[t + 1] - values[t]
+        last = delta + gamma * lam * last
+        adv[t] = last
+    return adv, adv + values[:-1]
