@@ -1,0 +1,20 @@
+# @package _global_
+# ENSEMBLE ARM (2026-06-10): R15-safe deep-ensemble dynamics + epistemic
+# pessimism. N independently-initialized AFFINE members (mbrl.models.ensemble;
+# affinity tested per member) replace the single dynamics; every member
+# regresses to the data; imagination steps through the ensemble MEAN and the
+# imagined reward is discounted by ensemble DISAGREEMENT (PETS/MBPO-style):
+#   r_im -= ensemble_pessimism * std_members(z')
+# Hypothesis to validate: epistemic discounting suppresses model-exploitation
+# in long-horizon imagination (compare imagine/return_var + eval/return vs the
+# champion). Status: implementation-validated (tests incl. bitwise resume);
+# NOT yet RL-validated — this config is the arm to run, not a claim.
+# Sweep grid: algo.ensemble_pessimism in {0.0, 0.25, 0.5, 1.0} x seeds {0,1,2};
+# algo.dynamics_ensemble in {3, 5}.
+experiment:
+  name: ensemble
+model:
+  dynamics: affine        # ensemble members are deterministic-affine (enforced)
+algo:
+  dynamics_ensemble: 5
+  ensemble_pessimism: 0.5

@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from ..models import (Encoder, EMAEncoder, VAEEncoder, AffineDynamics,
                       GaussianAffineDynamics, FullMLPDynamics, RewardModel,
                       Policy, ValueFn)
+from ..models.ensemble import EnsembleAffineDynamics
 from ..models.reward import symlog, symexp
 from ..models.spectral import SpectralReward, poly_weights, snr_band_weights
 from ..regularization.hutchinson import hvp_penalty, laplacian_trace_penalty
@@ -60,7 +61,21 @@ class Trainer:
             import warnings as _w2
             _w2.warn("[dynamics] mlp is the run-9 R15-ablation arm: action "
                      "curvature is deliberately unconstrained. Never a default.")
-        self.dynamics = dyn_cls(k, action_dim, h, d).to(device)
+        # algo.dynamics_ensemble >= 2: an R15-SAFE PETS-style ensemble of affine
+        # members replaces the single dynamics (WIRED arm, 2026-06-10). Members
+        # are deterministic-affine, so it composes only with dynamics=affine.
+        _n_ens = int((cfg.get("algo", {}) or {}).get("dynamics_ensemble", 0) or 0)
+        self.dyn_ensemble = _n_ens >= 2
+        if self.dyn_ensemble and _dyn_kind != "affine":
+            raise ValueError(
+                "algo.dynamics_ensemble requires model.dynamics=affine (members are "
+                f"deterministic affine maps, R15-safe); got dynamics='{_dyn_kind}'")
+        if self.dyn_ensemble:
+            self.dynamics = EnsembleAffineDynamics(k, action_dim, _n_ens, h, d).to(device)
+        else:
+            self.dynamics = dyn_cls(k, action_dim, h, d).to(device)
+        # epistemic discount on imagined reward: r -= coef * ensemble disagreement
+        self.ens_pessimism = float((cfg.get("algo", {}) or {}).get("ensemble_pessimism", 0.0) or 0.0)
         self.symlog = bool(cfg.model.get("symlog_reward", False))
         self.reward = RewardModel(k, action_dim, h, d, task_dim=task_dim,
                                   n_heads=int(cfg.model.get("reward_heads", 1))).to(device)
@@ -377,7 +392,17 @@ class Trainer:
                                                       / std.mean().clamp_min(1e-9)),
                              "dyn/pred_std": float(std.mean())}
         else:
-            dyn_loss = F.mse_loss(self.dynamics(z, a), z_next_tgt)
+            if self.dyn_ensemble:
+                # deep-ensemble discipline: EVERY member regresses to the data;
+                # diversity persists from independent inits (fitting only the
+                # mean would leave the disagreement signal unregularized)
+                preds = self.dynamics.all_members(z, a)            # (M, B, k)
+                dyn_loss = F.mse_loss(preds, z_next_tgt.unsqueeze(0).expand_as(preds))
+                with torch.no_grad():
+                    dyn_calib = {"dyn/disagreement":
+                                 float(self.dynamics.disagreement(z, a).mean())}
+            else:
+                dyn_loss = F.mse_loss(self.dynamics(z, a), z_next_tgt)
         # reward model predicts symlog(r) when model.symlog_reward is on;
         # imagination applies symexp to whatever it consumes (behaviour_update)
         r_target = symlog(r) if self.symlog else r
@@ -618,6 +643,10 @@ class Trainer:
             z = self.dynamics(z, a)
             zs.append(z)
             r_im, d = self._imagined_reward(zs[-2], a, tau0)
+            if self.dyn_ensemble and self.ens_pessimism > 0.0:
+                # epistemic discount (PETS/MBPO-style): distrust imagined reward
+                # where the dynamics ensemble disagrees about the transition
+                r_im = r_im - self.ens_pessimism * self.dynamics.disagreement(zs[-2], a)
             rs.append(r_im)
             dis.append(d)
             logps.append(logp)

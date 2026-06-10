@@ -182,8 +182,11 @@ logging:
 algo:
   critic: value                # value (default) | twin_q  (clipped double-Q, TD3/SAC)
   actor: gaussian              # gaussian (default) | squashed_gaussian  (SAC tanh actor)
-  dynamics_ensemble: 0         # 0 = single dynamics (default) | N>=2 affine members
-                               # (R15-SAFE PETS-style ensembling: mean + disagreement)
+  dynamics_ensemble: 0         # 0 = single dynamics (default) | N>=2 affine members —
+                               # WIRED (2026-06-10): R15-safe ensemble replaces the
+                               # dynamics; imagination uses the mean; see ensemble_pessimism
+  ensemble_pessimism: 0.0      # WIRED: r_im -= coef * ensemble disagreement (epistemic
+                               # discount; only active when dynamics_ensemble >= 2)
   planner: none                # none (default) | cem  (cross-entropy-method MPC)
   cem:                         # CEM params (consumed when planner=cem lands)
     horizon: 12

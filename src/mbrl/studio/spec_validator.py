@@ -94,10 +94,6 @@ def validate_spec(spec: dict) -> list[str]:
         warns.append("algo.actor '%s' is implemented + tested but not yet consumed "
                      "by the Trainer — the run trains with the default Gaussian policy"
                      % algo.get("actor"))
-    if int(algo.get("dynamics_ensemble", 0) or 0) >= 2:
-        warns.append("algo.dynamics_ensemble=%s is implemented + tested but not yet "
-                     "consumed by the Trainer — the run trains with single dynamics"
-                     % algo.get("dynamics_ensemble"))
     if str(algo.get("planner", "none")) != "none":
         warns.append("algo.planner '%s' is implemented + tested but not yet consumed "
                      "by the Trainer — actions come from the policy, not MPC"

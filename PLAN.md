@@ -135,6 +135,7 @@ with the existing project figure style):
 | 8 | λ-schedule ablation: (t₀/(t₀+t))^⅓ vs step vs cosine vs constant | Pendulum local, HalfCheetah Colab | `experiment/schedule.yaml` |
 | 9 | Multi-task zero-shot generalization: task-conditioned reward, train on N tasks, eval held-out τ (interp + extrap separately); penalty over (z,a,τ) vs (z,a) vs λ=0 | PendulumTarget local, HalfCheetahVel Colab | `multitask.yaml` (own entry point `train_multitask.py`) |
 | 10 | **Gap-closing transversality test** (docs/claims_ledger.md): competent-policy data + curved (Gaussian-bump) reward; arms none/R/R+T; ≥5 seeds; success = predicted 6–25% R+T benefit AND benefit correlates with α | **local CPU** | `scripts/transversality_test.py` |
+| 11 | **Ensemble-pessimism arm** (2026-06-10): R15-safe affine deep-ensemble dynamics + disagreement discount on imagined reward; arms pessimism ∈ {0, .25, .5, 1} × members {3,5} × ≥3 seeds; success = imagined-return variance drops without eval-return regression vs champion | Pendulum local; HalfCheetah Colab/cloud | `experiment/ensemble.yaml` |
 
 Priority order: 1 (the breadth gap) → 3 (cheap, informs everything) → 8 → 4 → 5 → 2 → 6/7.
 Items 6–7 run entirely locally and can proceed in parallel with everything else from day one.
