@@ -51,3 +51,30 @@ def build_net(layers: list[dict]) -> nn.Sequential:
     if not layers:
         raise ValueError("encoder_net is empty — nothing to build")
     return nn.Sequential(*(build_layer(l) for l in layers))
+
+
+# ---- shape-rank typing (W7 it.4; parity with compile.gd::check_chain_ranks) --
+# Rank = tensor dims excluding batch: 1=(F,), 2=(C,L), 3=(C,H,W), 4=(C,D,H,W).
+_RANKS = {"linear": ([1], 1), "conv1d": ([2], 2), "conv2d": ([3], 3),
+          "conv3d": ([4], 4), "flatten": ([], 1)}
+
+
+def check_net_ranks(layers: list[dict], source_rank: int = 1) -> list[str]:
+    """Walk the chain propagating rank; return human errors naming the layer.
+    The Studio refuses these at authoring; this is the apparatus-side shadow
+    for specs assembled without the graph."""
+    errs: list[str] = []
+    rank = source_rank
+    for i, layer in enumerate(layers):
+        kind = str(layer.get("kind", ""))
+        if kind == "batch_norm":
+            dims = int(layer.get("dims", 1))
+            accepted, out = ([1, 2] if dims == 1 else [dims + 1]), -1
+        else:
+            accepted, out = _RANKS.get(kind, ([], -1))
+        if accepted and rank not in accepted:
+            errs.append(f"layer {i + 1} ({kind}) wants input rank {accepted} "
+                        f"but receives rank {rank}")
+            return errs
+        rank = rank if out == -1 else out
+    return errs

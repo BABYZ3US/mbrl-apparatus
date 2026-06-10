@@ -69,3 +69,29 @@ def test_validator_accepts_consumed_custom_encoder():
     assert not any("not yet consumed" in w for w in validate_spec(spec))
     warns2 = validate_spec({"model": {"encoder": "custom"}})
     assert any("encoder_net is empty" in w for w in warns2)
+
+
+def test_rank_walk_refuses_conv_on_flat_and_passes_legal_chains():
+    from mbrl.models.net_builder import check_net_ranks
+    # conv2d-first on flat obs: named refusal at layer 1
+    errs = check_net_ranks([{"kind": "conv2d", "out_channels": 8}], source_rank=1)
+    assert len(errs) == 1 and "conv2d" in errs[0] and "rank 1" in errs[0]
+    # the canonical image chain from rank 3: conv -> bn2 -> flatten -> linear
+    assert check_net_ranks([
+        {"kind": "conv2d", "out_channels": 8},
+        {"kind": "batch_norm", "dims": 2},
+        {"kind": "activation", "act": "relu"},
+        {"kind": "flatten"},
+        {"kind": "linear", "out_features": 16},
+    ], source_rank=3) == []
+    # linear after conv WITHOUT flatten: refused at the linear
+    errs2 = check_net_ranks([
+        {"kind": "conv2d", "out_channels": 8},
+        {"kind": "linear", "out_features": 16},
+    ], source_rank=3)
+    assert len(errs2) == 1 and "linear" in errs2[0]
+    # validator surfaces the shadow
+    from mbrl.studio.spec_validator import validate_spec
+    warns = validate_spec({"model": {"encoder": "custom",
+                                     "encoder_net": [{"kind": "conv2d", "out_channels": 8}]}})
+    assert any("encoder_net: layer 1 (conv2d)" in w for w in warns)

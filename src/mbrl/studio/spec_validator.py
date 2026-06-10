@@ -100,9 +100,13 @@ def validate_spec(spec: dict) -> list[str]:
                      % algo.get("planner"))
     model = _as_dict(spec.get("model"))
     if str(model.get("encoder", "")) == "custom":
-        if not list(model.get("encoder_net", []) or []):
+        net = [dict(l) for l in (model.get("encoder_net", []) or [])]
+        if not net:
             warns.append("model.encoder=custom but encoder_net is empty — wire an "
                          "NN-layer chain into the encoder's net pin")
+        else:
+            from ..models.net_builder import check_net_ranks
+            warns.extend("encoder_net: " + e for e in check_net_ranks(net, 1))
     spectral = _as_dict(spec.get("spectral"))
     if not bool(spectral.get("enabled", False)):
         return warns  # non-spectral path: house rules don't apply
