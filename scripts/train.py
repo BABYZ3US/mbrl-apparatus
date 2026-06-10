@@ -83,7 +83,8 @@ def main(cfg: DictConfig):
     local_log = MetricsLogger(cfg.logging.dir,
                               f"{cfg.experiment.name}-{cfg.env.name}-s{cfg.seed}",
                               meta={"group": cfg.experiment.name, "env": cfg.env.name,
-                                    "seed": cfg.seed})
+                                    "seed": cfg.seed},
+                              config=OmegaConf.to_container(cfg, resolve=True))
     trainer = Trainer(cfg, cfg.env.obs_dim, cfg.env.action_dim, device=device)
     buffer = ReplayBuffer(int(1e6), cfg.env.obs_dim, cfg.env.action_dim, cfg.seed)
     ckpt = CheckpointManager("checkpoints/" + run.name,

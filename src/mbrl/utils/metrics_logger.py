@@ -13,11 +13,17 @@ from mbrl.utils.metric_store import MetricStore
 
 
 class MetricsLogger:
-    def __init__(self, root: str | Path, run_name: str, meta: dict | None = None):
+    def __init__(self, root: str | Path, run_name: str, meta: dict | None = None,
+                 config: dict | None = None):
         self.dir = Path(root) / "runs" / run_name
         self.dir.mkdir(parents=True, exist_ok=True)
         if meta:
             (self.dir / "meta.json").write_text(json.dumps(meta, indent=1, default=str))
+        if config:
+            # the run's RESOLVED config (W8: pull.artifacts serves it — spec
+            # diffing + resume need the exact dict the run trained with)
+            (self.dir / "config.json").write_text(
+                json.dumps(config, indent=1, default=str))
         self._fh = open(self.dir / "metrics.jsonl", "a", buffering=1)  # line-buffered
         # Buffered SQLite mirror (metrics.db). The studio bridge reads it back lock-free
         # under WAL. Dual-write: JSONL stays the canonical source, the db is additive.

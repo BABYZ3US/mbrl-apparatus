@@ -40,7 +40,7 @@ VERBS: dict[str, dict] = {
     "env.spec":          {"status": "godot",   "dir": "->",  "desc": "train seam — served by Godot serve_env"},
     "infer.load":        {"status": "godot",   "dir": "->",  "desc": "in-engine ONNX — not served by the runner"},
     "infer.run":         {"status": "godot",   "dir": "->",  "desc": "in-engine ONNX — not served by the runner"},
-    "pull.artifacts":    {"status": "served",  "dir": "<->", "desc": "a run's artifact manifest (checkpoints + W&B artifacts)"},
+    "pull.artifacts":    {"status": "served",  "dir": "<->", "desc": "a run's artifact manifest (checkpoints + W&B artifacts) + its resolved config"},
     "pull.sweep":        {"status": "served",  "dir": "<->", "desc": "sweep cells grid: catalog (no name) or flattened arm-rows from results/<name>_cells.jsonl"},
     "pull.diagnostics":  {"status": "served",  "dir": "<->", "desc": "PCA/cross-validation reports: catalog (no name) or the named results/diagnostics/<name>.json payload"},
     "error":             {"status": "served",  "dir": "<-",  "desc": "error envelope {code, message}"},

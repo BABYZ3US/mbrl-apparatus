@@ -218,6 +218,17 @@ class RunIndex:
         return out
 
     # ---------------- artifact manifest (pull.artifacts) ----------------
+    def get_config(self, run: str) -> dict:
+        """The run's RESOLVED training config (results/runs/<run>/config.json,
+        written by MetricsLogger at startup). {} when absent/torn — old runs
+        predate the dump; the UI says so instead of inventing one."""
+        path = self.results_root / "runs" / str(run) / "config.json"
+        try:
+            obj = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return obj if isinstance(obj, dict) else {}
+
     def list_artifacts(self, run: str) -> list[dict]:
         """A run's artifact manifest (checkpoints + any logged W&B artifacts), read
         from results/runs/<run>/artifacts.json — written by the training side

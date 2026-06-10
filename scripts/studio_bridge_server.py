@@ -417,8 +417,10 @@ class StudioBridgeServer:
                         {"items": idx.list_datasets(data.get("kind"))}, id_)
         if type_ == PULL_ARTIFACTS:
             idx = RunIndex(self.results_dir.parent, ckpt_root=self.checkpoints_dir)
+            run_name = str(data.get("run", ""))
             return make(PULL_ARTIFACTS,
-                        {"artifacts": idx.list_artifacts(str(data.get("run", "")))}, id_)
+                        {"artifacts": idx.list_artifacts(run_name),
+                         "config": idx.get_config(run_name)}, id_)
         if type_ == PULL_SURFACE:
             # A7: Godot sends step=-1 for "latest" (bridge.gd pull_surface default);
             # SurfaceIndex wants None for latest — normalize, else -1 exact-matches
