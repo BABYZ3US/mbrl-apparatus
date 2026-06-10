@@ -8,3 +8,7 @@ outputs/
 .pytest_cache/
 *.egg-info/
 pytest-cache-files-*/
+
+# documentation dump for local reference — 2.2G, never commit
+godot-docs-html-master/
+.DS_Store
