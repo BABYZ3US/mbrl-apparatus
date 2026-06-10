@@ -306,6 +306,43 @@ class Trainer:
             return 0.0
         return sum(h.hessian_frobenius_sq() for h in self.spec_heads) / len(self.spec_heads)
 
+    # ---------------- reward-surface + Hessian export (Studio viz-reward, M4) ----
+    def reward_concat_fn(self):
+        """The reward as f(x) over concatenated (z, a[, tau]) — the spectral
+        ensemble mean if spectral, else the MLP head mean (RewardModel.on_concat).
+        This is the SAME function the curvature penalty / imagination consume, so a
+        surface slice or Hessian spectrum reflects the reward ACTUALLY in use.
+        Before the first spectral refit (no heads) it returns zeros (no crash)."""
+        if self.spec_enabled:
+            heads = self.spec_heads
+            if not heads:
+                return lambda x: x.new_zeros(x.shape[:-1])
+            return lambda x: torch.stack([h.predict(x) for h in heads]).mean(0)
+        return self.reward.on_concat
+
+    def reward_input_dim(self) -> int:
+        """Dim of the reward's (z, a[, tau]) input — the surface / Hessian space."""
+        return self.reward.k + self.reward.m + self.reward.task_dim
+
+    def reward_hessian_eigs(self, center=None):
+        """Reward-Hessian eigenvalues (descending) at `center` (default the origin
+        of (z, a[, tau]) space) — backs the viz_ablation Hessian-spectrum panel."""
+        from ..viz.surface_export import hessian_spectrum
+        if center is None:
+            center = torch.zeros(self.reward_input_dim(), device=self.device)
+        return hessian_spectrum(self.reward_concat_fn(), center)
+
+    def reward_surface_payload(self, plane=(0, 1), n: int = 81, extent: float = 2.0,
+                               center=None, path=None, step=None, run=None) -> dict:
+        """The pull.surface payload (R̂ slice + curvature + budget) for the live
+        viz-reward panel — see mbrl.viz.surface_export.export_surface."""
+        from ..viz.surface_export import export_surface
+        if center is None:
+            center = torch.zeros(self.reward_input_dim(), device=self.device)
+        return export_surface(self.reward_concat_fn(), center, plane=plane, n=n,
+                              extent=extent, path=path,
+                              step=self.step if step is None else step, run=run)
+
     # ---------------- model learning ----------------
     def model_update(self, batch) -> dict:
         if self.task_dim:

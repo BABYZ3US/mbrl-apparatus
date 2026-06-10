@@ -90,7 +90,9 @@ def main(cfg: DictConfig):
                              every=cfg.checkpoint.every,
                              keep_last=cfg.checkpoint.keep_last,
                              milestone_every=cfg.checkpoint.milestone_every,
-                             wandb_run=run if cfg.checkpoint.push_wandb else None)
+                             wandb_run=run if cfg.checkpoint.push_wandb else None,
+                             results_root=cfg.logging.dir,
+                             run_name=f"{cfg.experiment.name}-{cfg.env.name}-s{cfg.seed}")
     env_steps = ckpt.resume(trainer) if cfg.checkpoint.resume == "auto" else 0
     ckpt.install_signal_handler(trainer, lambda: env_steps)
 
@@ -152,6 +154,26 @@ def main(cfg: DictConfig):
                         print(f"[warn] eval video logging failed ({e!r}); "
                               "training continues without videos")
                         video_warned = True
+        # ---- M4: optional reward-surface + Hessian-spectrum export. OFF by
+        # default; enable with `+viz.surface_every=N` (iterations). Writes a
+        # pull.surface artifact (results/runs/<run>/surfaces/) and logs Hessian
+        # eigenvalue summaries. Wrapped so viz can never kill a training run.
+        _viz = cfg.get("viz", None)
+        _surf_every = int(_viz.get("surface_every", 0)) if _viz else 0
+        if _surf_every and iteration % _surf_every == 0:
+            try:
+                from mbrl.viz.surface_export import write_surface_json
+                _run_name = f"{cfg.experiment.name}-{cfg.env.name}-s{cfg.seed}"
+                _payload = trainer.reward_surface_payload(step=env_steps, run=_run_name)
+                write_surface_json(_payload, cfg.logging.dir, _run_name, env_steps)
+                _eigs = trainer.reward_hessian_eigs()
+                if len(_eigs):
+                    metrics["reward_hess/eig_max"] = float(_eigs[0])
+                    metrics["reward_hess/eig_min"] = float(_eigs[-1])
+                metrics["reward/curvature_budget"] = float(_payload.get("budget", 0.0))
+            except Exception as _e:  # noqa: BLE001 — viz must never kill training
+                print(f"[warn] surface export failed ({_e!r}); training continues")
+
         run.log(metrics)
         local_log.log(metrics)   # offline mirror -> figures without network
         print(f"[train] iter {iteration} env_steps={env_steps} "
