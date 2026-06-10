@@ -137,3 +137,25 @@ def raise_if_invalid(spec: dict) -> None:
     warns = validate_spec(spec)
     if warns:
         raise SpecValidationError(warns)
+
+
+def spec_completeness(spec: dict) -> list[str]:
+    """The spec-level SHADOW of the graph's minimal-trainable check
+    (godot_studio/docs/graph_ports.md): key presence over the compiled
+    ModelSpec. It cannot see wires — the graph-side Compile.completeness is
+    authoritative for wiring; this catches specs assembled WITHOUT the graph
+    (CLI, tests) that forgot a required block. [] = complete.
+    """
+    msgs: list[str] = []
+    env = _as_dict(spec.get("env"))
+    if not str(env.get("name", "")):
+        msgs.append("missing env.name (the run block)")
+    model = _as_dict(spec.get("model"))
+    if not str(model.get("encoder", "")):
+        msgs.append("missing model.encoder")
+    if not str(model.get("dynamics", "")):
+        msgs.append("missing model.dynamics")
+    spectral = _as_dict(spec.get("spectral"))
+    if not bool(spectral.get("enabled", False)) and not str(model.get("reward", "")):
+        msgs.append("missing a reward head (no spectral block, no model.reward)")
+    return msgs

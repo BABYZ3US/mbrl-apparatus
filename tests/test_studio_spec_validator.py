@@ -94,3 +94,15 @@ def test_robust_to_malformed_blocks():
     # non-dict spectral/penalty/model must not crash (GDScript .get(k, {}) parity)
     assert validate_spec({"spectral": None}) == []
     assert validate_spec({"spectral": {"enabled": True}, "penalty": None, "model": None}) != []  # floor->0, cap->4
+
+
+def test_spec_completeness_flags_missing_blocks():
+    from mbrl.studio.spec_validator import spec_completeness
+    assert len(spec_completeness({})) == 4
+    full = {"env": {"name": "Pendulum-v1"},
+            "model": {"encoder": "vae", "dynamics": "gaussian"},
+            "spectral": {"enabled": True}}
+    assert spec_completeness(full) == []
+    no_reward = {"env": {"name": "P"}, "model": {"encoder": "mlp", "dynamics": "affine"}}
+    msgs = spec_completeness(no_reward)
+    assert len(msgs) == 1 and "reward" in msgs[0]
