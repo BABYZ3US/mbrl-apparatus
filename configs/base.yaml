@@ -132,6 +132,8 @@ imagination:
   horizon: 15           # long horizons enabled by curvature control (R15)
   gamma: 0.99
   lambda_: 0.95         # Dreamer lambda-returns
+  advantage: lambda     # lambda (default) | gae — battle-tested GAE(lambda)
+                        # policy weighting (value regression identical; tested)
   entropy_coef: 3.0e-4
   value_target_decay: 0.98
   pessimism: 0.5        # imagined reward = ensemble mean - pessimism * std
@@ -171,3 +173,20 @@ logging:
   video:                # eval rollout videos -> W&B (render failure only warns)
     enabled: true
     every_evals: 4      # record one extra rgb_array episode every Nth eval
+
+# ---- authorable algorithm components (battle-tested; Studio graph selectors) ----
+# Implemented + unit-tested in src/mbrl (critics.py, ensemble.py, planning/cem.py).
+# Selectors other than the defaults are NOT yet consumed by the Trainer — the
+# spec validator warns when one is authored, and each integration lands as its
+# own receipted arm (founding-doc discipline). Defaults = today's behavior.
+algo:
+  critic: value                # value (default) | twin_q  (clipped double-Q, TD3/SAC)
+  actor: gaussian              # gaussian (default) | squashed_gaussian  (SAC tanh actor)
+  dynamics_ensemble: 0         # 0 = single dynamics (default) | N>=2 affine members
+                               # (R15-SAFE PETS-style ensembling: mean + disagreement)
+  planner: none                # none (default) | cem  (cross-entropy-method MPC)
+  cem:                         # CEM params (consumed when planner=cem lands)
+    horizon: 12
+    pop: 256
+    iters: 5
+    elites: 32

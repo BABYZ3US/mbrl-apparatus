@@ -23,7 +23,7 @@ from ..models.reward import symlog, symexp
 from ..models.spectral import SpectralReward, poly_weights, snr_band_weights
 from ..regularization.hutchinson import hvp_penalty, laplacian_trace_penalty
 from ..regularization.schedule import LambdaSchedule
-from ..training.returns import lambda_returns
+from ..training.returns import lambda_returns, gae_advantages
 from ..training.smoothing import smooth_rewards
 from ..utils.seeding import make_generator
 
@@ -629,7 +629,16 @@ class Trainer:
             flat = zs.reshape(-1, zs.shape[-1])
             tgt_tau = tau0.repeat(H + 1, 1) if tau0 is not None else None
             v_tgt = self.value_target(flat, tgt_tau).reshape(H + 1, -1)
-        returns = lambda_returns(rs, v_tgt, gamma, lam_ret)       # (H, B)
+        # advantage estimator: "lambda" (default, unchanged) | "gae" (Schulman 2016,
+        # the PPO/A2C standard). Both share gamma/lambda_; GAE's value target
+        # (adv + v) IS the lambda-return (pinned by test_returns_gae), so the value
+        # regression below is identical — only the POLICY weighting changes.
+        advantage = str(cfg_i.get("advantage", "lambda"))
+        if advantage == "gae":
+            adv, returns = gae_advantages(rs, v_tgt, gamma, lam_ret)  # (H, B) x2
+        else:
+            returns = lambda_returns(rs, v_tgt, gamma, lam_ret)       # (H, B)
+            adv = None
 
         # --- return normalization (Dreamer-V3): scale-invariant policy gradient
         with torch.no_grad():
@@ -641,10 +650,11 @@ class Trainer:
                 self.ret_scale = decay * self.ret_scale + (1 - decay) * span
         norm = max(1.0, self.ret_scale)
 
-        # --- policy: maximize normalized lambda-returns + entropy
-        #     (never curvature-penalized, R10)
+        # --- policy: maximize normalized lambda-returns (or GAE advantages) +
+        #     entropy (never curvature-penalized, R10)
         entropy = -logps.mean()
-        pi_loss = -(returns / norm).mean() - ent_coef * entropy
+        pi_signal = adv if adv is not None else returns
+        pi_loss = -(pi_signal / norm).mean() - ent_coef * entropy
         self.policy_opt.zero_grad(set_to_none=True)
         pi_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 100.0)

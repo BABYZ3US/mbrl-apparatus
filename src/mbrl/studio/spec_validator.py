@@ -83,6 +83,25 @@ def validate_spec(spec: dict) -> list[str]:
     the shared contract pins.
     """
     warns: list[str] = []
+    # authorable-but-unwired algo selectors (battle-tested components, integration
+    # pending per arm): warn so an authored spec is honest about what trains today.
+    algo = _as_dict(spec.get("algo"))
+    if str(algo.get("critic", "value")) != "value":
+        warns.append("algo.critic '%s' is implemented + tested but not yet consumed "
+                     "by the Trainer — the run trains with the default value head"
+                     % algo.get("critic"))
+    if str(algo.get("actor", "gaussian")) != "gaussian":
+        warns.append("algo.actor '%s' is implemented + tested but not yet consumed "
+                     "by the Trainer — the run trains with the default Gaussian policy"
+                     % algo.get("actor"))
+    if int(algo.get("dynamics_ensemble", 0) or 0) >= 2:
+        warns.append("algo.dynamics_ensemble=%s is implemented + tested but not yet "
+                     "consumed by the Trainer — the run trains with single dynamics"
+                     % algo.get("dynamics_ensemble"))
+    if str(algo.get("planner", "none")) != "none":
+        warns.append("algo.planner '%s' is implemented + tested but not yet consumed "
+                     "by the Trainer — actions come from the policy, not MPC"
+                     % algo.get("planner"))
     spectral = _as_dict(spec.get("spectral"))
     if not bool(spectral.get("enabled", False)):
         return warns  # non-spectral path: house rules don't apply
