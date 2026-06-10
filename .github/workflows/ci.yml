@@ -1,0 +1,70 @@
+# CI for mbrl-curvature — mirrors the Makefile (make test / lint / seal-check).
+# The Makefile is the source of truth for HOW things run; this workflow runs the
+# same commands in a clean uv-managed env on every push and PR to main.
+#
+#   make test       -> pytest -m "not slow"   (fast, hermetic; the gate here)
+#   make seal-check -> training code imports core deps only
+#   lint            -> ruff (ruff is fetched via `uv tool run`; it is not a runtime dep,
+#                      so the sealed image stays untouched — matches the seal discipline)
+#
+# uv.lock is committed and reproduces the exact env every ledger result used
+# (pyproject [tool.uv] constraints). Python is pinned to 3.11 via .python-version.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch/PR cancels the older in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: lint + fast tests (py3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # CPU-only CI: the curvature penalty's double-backward path is exercised on
+      # CPU (MPS is unsupported per CLAUDE.md; CUDA absent on the runner).
+      UV_SYSTEM_PYTHON: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv (with built-in cache)
+        uses: astral-sh/setup-uv@v5
+        with:
+          # Cache the uv download cache, keyed on the committed lockfile.
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Pin Python (from .python-version -> 3.11)
+        run: uv python install
+
+      - name: Sync env from lock (dev extra; analysis not needed for tests)
+        # Exact install from uv.lock. We add the dev extra (pytest, xdist) but NOT
+        # mujoco — the fast suite (`-m "not slow"`) is hermetic and avoids MuJoCo.
+        # Prefer the frozen (lock-exact) install for reproducibility; fall back to a
+        # normal resolve only if the lock ever needs a refresh, so CI is never bricked.
+        run: uv sync --extra dev --frozen || uv sync --extra dev
+
+      - name: Lint (ruff)
+        # ruff is run as an ephemeral, version-pinned tool (uvx) so it never enters
+        # the sealed runtime deps and CI is reproducible. Config: [tool.ruff] in
+        # pyproject (tuned green on the current tree). `make lint` uses pyflakes
+        # locally; ruff is the CI superset.
+        run: uvx ruff@0.15.16 check .
+
+      - name: Fast tests (mirror `make test`)
+        run: uv run pytest tests/ -q -m "not slow"
+
+      - name: Seal check (mirror `make seal-check`)
+        # Training entrypoints must import only core deps. Make target is `seal-check`.
+        run: make seal-check

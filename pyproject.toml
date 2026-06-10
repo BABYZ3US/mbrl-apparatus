@@ -42,6 +42,30 @@ constraint-dependencies = [
     "joblib==1.4.2",
 ]
 
+# Ruff is the CI/hook lint superset of the Makefile's advisory `pyflakes` gate
+# (make lint runs `pyflakes ... || true`). It is NOT a runtime/dev dependency and
+# is deliberately kept out of uv.lock / the sealed image — CI and hooks run it
+# ephemerally via `uvx ruff` (so the lock-discipline in [tool.uv] is untouched).
+#
+# This config is tuned so `ruff check .` is GREEN on the current tree: it keeps the
+# bug-class checks (pyflakes `F`, real `E` errors) and ignores the stylistic rules
+# the apparatus uses on purpose — semicolon-compacted statements (E702/E703),
+# assigned lambdas (E731), deliberate late imports for arg parsing (E402), the
+# `l` comprehension variable (E741), line length (E501). `__init__.py` re-exports
+# and unused test imports are allowed (per-file). Tighten later if desired.
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["godot-docs-html-master", "outputs", "results", "checkpoints"]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E401", "E402", "E701", "E702", "E703", "E731", "E741", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]      # intentional re-exports (package public surface)
+"tests/**" = ["F401"]          # advisory only; don't fail the suite on a stray test import
+
 [tool.pytest.ini_options]
 markers = ["slow: integration tests (full env loops); excluded by make test, run by make test-all"]
 testpaths = ["tests"]

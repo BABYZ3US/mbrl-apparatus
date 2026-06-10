@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# pre-push hook (mbrl-curvature) — gate a push on lint + the fast test suite,
+# mirroring `make test` / `make ci`. Blocks the push (exit 1) on any failure.
+#
+# Installed via scripts/install_hooks.sh (sets core.hooksPath=hooks). Runs on the
+# user's Mac. Tool resolution prefers the committed lockfile env (.venv/bin),
+# then `uv run`; ruff is fetched ephemerally with `uvx` if not installed (it is
+# not a runtime dep — keeps the sealed image clean). Set PREPUSH_SKIP=1 to bypass
+# in an emergency (e.g. pushing a docs-only branch); use sparingly.
+set -uo pipefail
+
+if [ "${PREPUSH_SKIP:-0}" = "1" ]; then
+    echo "[pre-push] PREPUSH_SKIP=1 set — skipping checks." >&2
+    exit 0
+fi
+
+# Repo root = parent of hooks/ (this file lives in <repo>/hooks/pre-push).
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd)"
+REPO_DIR="$(cd "$HOOK_DIR/.." >/dev/null 2>&1 && pwd)"
+cd "$REPO_DIR" || exit 1
+
+VENV_BIN="$REPO_DIR/.venv/bin"
+fail=0
+
+echo "[pre-push] mbrl-curvature: lint + fast tests (mirrors make test)"
+
+# Trust .venv/bin/* only if its interpreter actually runs on THIS machine. The
+# venv may have been created elsewhere (its python can symlink to a path that does
+# not exist here), in which case the wrappers are +x but die with "bad interpreter".
+venv_ok() {
+    [ -x "$VENV_BIN/python" ] && "$VENV_BIN/python" -c 'import sys' >/dev/null 2>&1
+}
+
+# --- choose a runner for ruff -------------------------------------------------
+# Prefer (working) .venv/bin/ruff, else `uv tool run ruff` (uvx), else `uv run ruff`,
+# else fall back to pyflakes (what `make lint` uses) so the hook still adds value.
+run_ruff() {
+    if venv_ok && [ -x "$VENV_BIN/ruff" ]; then
+        "$VENV_BIN/ruff" check .
+    elif command -v uvx >/dev/null 2>&1; then
+        uvx ruff@0.15.16 check .
+    elif command -v uv >/dev/null 2>&1; then
+        uv tool run ruff@0.15.16 check . 2>/dev/null || uv run ruff check .
+    elif venv_ok && [ -x "$VENV_BIN/pyflakes" ]; then
+        echo "[pre-push] ruff unavailable — falling back to pyflakes" >&2
+        "$VENV_BIN/pyflakes" src/mbrl scripts
+    else
+        echo "[pre-push] WARNING: no ruff/pyflakes available; skipping lint" >&2
+        return 0
+    fi
+}
+
+# --- choose a runner for pytest ----------------------------------------------
+run_pytest() {
+    if venv_ok && [ -x "$VENV_BIN/pytest" ]; then
+        "$VENV_BIN/pytest" tests/ -q -m "not slow"
+    elif command -v uv >/dev/null 2>&1; then
+        uv run pytest tests/ -q -m "not slow"
+    elif command -v pytest >/dev/null 2>&1; then
+        pytest tests/ -q -m "not slow"
+    else
+        echo "[pre-push] ERROR: no pytest available (.venv missing? run 'make sync')" >&2
+        return 1
+    fi
+}
+
+echo "[pre-push] -> ruff check ."
+if ! run_ruff; then
+    echo "[pre-push] ruff FAILED" >&2
+    fail=1
+fi
+
+echo "[pre-push] -> pytest -m 'not slow'"
+if ! run_pytest; then
+    echo "[pre-push] pytest FAILED" >&2
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo "[pre-push] BLOCKED: fix the failures above, or push with PREPUSH_SKIP=1 to bypass." >&2
+    exit 1
+fi
+
+echo "[pre-push] OK — lint + fast tests passed."
+exit 0

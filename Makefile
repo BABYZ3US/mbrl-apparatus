@@ -1,9 +1,21 @@
 # Common entry points. All targets are safe to re-run (benchmarks are
 # cell-resumable; tests are hermetic).
-.PHONY: test test-all lint bench bridge recipe angle dashboard figures spectral-rl status ledger-check image seal-check lock sync clean
+.PHONY: test test-all lint ci hooks-install audit bench bridge recipe angle dashboard figures spectral-rl status ledger-check image seal-check lock sync clean
 
 test:              ## fast set (excludes @slow integration tests)
 	python -m pytest tests/ -q -m "not slow"
+
+ci:                ## run the CI gate locally (lint + fast tests + seal-check), mirrors .github/workflows/ci.yml
+	@command -v uvx >/dev/null 2>&1 && uvx ruff@0.15.16 check . \
+	    || python -m pyflakes src/mbrl scripts
+	python -m pytest tests/ -q -m "not slow"
+	$(MAKE) seal-check
+
+hooks-install:     ## install git pre-push hook (core.hooksPath=hooks) for this repo
+	bash scripts/install_hooks.sh
+
+audit:             ## run the nightly deterministic codebase audit over both repos (appends to math/docs)
+	bash ../scripts/nightly_codebase_audit.sh
 
 test-all:
 	python -m pytest tests/ -q
