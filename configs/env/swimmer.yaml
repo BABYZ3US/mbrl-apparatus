@@ -1,0 +1,4 @@
+name: Swimmer-v5
+obs_dim: 8
+action_dim: 2
+action_scale: 1.0

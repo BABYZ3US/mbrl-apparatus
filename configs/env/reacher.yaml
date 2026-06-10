@@ -1,0 +1,6 @@
+# Reacher-v5 obs is (10,) — v4 was 11; the v5 release removed a redundant
+# element (gymnasium.farama.org/environments/mujoco/reacher, v5 source).
+name: Reacher-v5
+obs_dim: 10
+action_dim: 2
+action_scale: 1.0

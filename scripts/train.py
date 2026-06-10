@@ -18,6 +18,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from mbrl.training import Trainer, ReplayBuffer, collect_vectorized
+import mbrl.envs  # noqa: F401 — side effect: registers TraceAtlas-v0 with gym
 from mbrl.utils import CheckpointManager, seed_everything, init_wandb
 from mbrl.utils.metrics_logger import MetricsLogger
 

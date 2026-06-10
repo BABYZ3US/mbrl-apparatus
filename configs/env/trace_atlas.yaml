@@ -1,0 +1,7 @@
+# The in-house benchmark: proof-spectral reconstruction over the trace-atlas
+# corpus (src/mbrl/envs/trace_atlas.py; registered as TraceAtlas-v0 in
+# mbrl.envs). obs = spectral top-k (k=8), action = unit embedding (32).
+name: TraceAtlas-v0
+obs_dim: 8
+action_dim: 32
+action_scale: 1.0

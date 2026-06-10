@@ -1,0 +1,4 @@
+name: Hopper-v5
+obs_dim: 11
+action_dim: 3
+action_scale: 1.0
