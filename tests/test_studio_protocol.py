@@ -16,7 +16,7 @@ from mbrl.studio import protocol
 
 def test_every_server_verb_constant_is_in_the_ssot():
     server_verbs = {sb.HELLO, sb.PULL_RUNS, sb.PULL_METRIC, sb.PULL_METRIC_SINCE,
-                    sb.PULL_DATASETS, sb.PULL_ARTIFACTS, sb.PULL_SURFACE, sb.PULL_DIAGNOSTICS, sb.SUBMIT_SPEC,
+                    sb.PULL_DATASETS, sb.PULL_ARTIFACTS, sb.PULL_SURFACE, sb.PULL_DIAGNOSTICS, sb.SEARCH_SUBMIT, sb.SEARCH_STATUS, sb.SEARCH_TICK, sb.SUBMIT_SPEC,
                     sb.SUBMIT_SWEEP, sb.PULL_RUN_STATUS, sb.PULL_LAUNCHED, sb.PULL_LOG,
                     sb.RUN_CANCEL, sb.ENV_RESET, sb.ENV_STEP, sb.ENV_SPEC, sb.INFER_LOAD,
                     sb.INFER_RUN, sb.ERROR}

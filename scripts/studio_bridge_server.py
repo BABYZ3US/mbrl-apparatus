@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -84,6 +85,9 @@ PULL_RUN_STATUS = "pull.run_status"   # launch/monitor seam
 PULL_LAUNCHED = "pull.launched"
 PULL_LOG = "pull.log"
 RUN_CANCEL = "run.cancel"
+SEARCH_SUBMIT = "search.submit"   # W9: random search + early stopping
+SEARCH_STATUS = "search.status"
+SEARCH_TICK = "search.tick"
 ERROR = "error"
 
 # Authored experiment yamls land here (gitignored authoring dir, NOT configs/ —
@@ -376,6 +380,133 @@ class StudioBridgeServer:
         _log("submit_sweep.done", group=plan.group, n=plan.n, dry_run=self.dry_run)
         return reply
 
+    # ---- W9: random search with median-rule early stopping ----
+    # The server OWNS launch/cancel; the scheduler core (mbrl.search) is pure;
+    # the Studio drives ticks while it is open (no background thread — the
+    # request/response loop stays single-threaded and testable).
+
+    def _search_store(self):
+        from mbrl.search import SearchStore
+        return SearchStore(self.results_dir.parent)
+
+    @staticmethod
+    def _arms_lite(state: dict) -> list[dict]:
+        """Arm rows without the embedded specs (wire-friendly)."""
+        return [{"name": a.get("name"), "status": a.get("status"),
+                 "overrides": a.get("overrides", {})}
+                for a in state.get("arms", [])]
+
+    def search_submit(self, data: dict) -> dict:
+        from mbrl.search import sample_axes
+        from mbrl.studio.spec_to_config import run_name_for_spec
+        from mbrl.studio.sweep import _set_path
+
+        base = data.get("base_spec", {})
+        if not isinstance(base, dict) or not base:
+            return {"accepted": False, "error": "base_spec must be a non-empty object"}
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(data.get("name") or "search")).strip("-") or "search"
+        store = self._search_store()
+        if store.load(name):
+            return {"accepted": False, "error": f"search '{name}' already exists"}
+        try:
+            samples = sample_axes(list(data.get("axes", [])),
+                                  int(data.get("n_arms", 8)),
+                                  int(data.get("seed", 0)))
+        except ValueError as exc:
+            return {"accepted": False, "error": str(exc)}
+        arms = []
+        for i, overrides in enumerate(samples):
+            spec = json.loads(json.dumps(base))            # deep copy, wire-safe
+            for path, value in overrides.items():
+                _set_path(spec, path, value)
+            spec.setdefault("experiment", {})["name"] = f"{name}-a{i:02d}"
+            arms.append({"name": run_name_for_spec(spec), "overrides": overrides,
+                         "spec": spec, "status": "queued"})
+        state = {"name": name, "metric": str(data.get("metric", "eval/return")),
+                 "mode": str(data.get("mode", "max")),
+                 "parallel": max(1, int(data.get("parallel", 2))),
+                 "min_points": int(data.get("min_points", 3)),
+                 "min_arms": int(data.get("min_arms", 3)),
+                 "arms": arms}
+        store.save(name, state)
+        tick = self.search_tick({"name": name})            # launch the first batch
+        _log("search.submit", name=name, n=len(arms), parallel=state["parallel"])
+        return {"accepted": True, "name": name, "n": len(arms),
+                "parallel": state["parallel"], "launched": tick.get("launched", []),
+                **({"dry_run": True} if self.dry_run else {})}
+
+    def search_status(self, data: dict) -> dict:
+        store = self._search_store()
+        name = str(data.get("name", ""))
+        if name == "":
+            return {"items": store.list_names()}
+        state = store.load(name)
+        if not state:
+            return {"name": name, "found": False}
+        idx = RunIndex(self.results_dir.parent, ckpt_root=self.checkpoints_dir)
+        metric = str(state.get("metric", "eval/return"))
+        arms = self._arms_lite(state)
+        for arm in arms:
+            m = idx.get_metric(str(arm["name"]), metric)
+            vals = m.get("values", [])
+            arm["last"] = vals[-1] if vals else None
+            arm["points"] = len(vals)
+        live = any(a["status"] in ("queued", "running") for a in arms)
+        return {"name": name, "found": True, "metric": metric,
+                "mode": state.get("mode"), "parallel": state.get("parallel"),
+                "arms": arms, "done": not live}
+
+    def search_tick(self, data: dict) -> dict:
+        from mbrl.search import decide_stops, next_actions
+
+        store = self._search_store()
+        name = str(data.get("name", ""))
+        state = store.load(name)
+        if not state:
+            return {"name": name, "found": False}
+        # 1. sync RUNNING arms against the launcher's live states
+        launch_states = {r.get("run_name"): r.get("state")
+                         for r in self.launcher.list()}
+        for arm in state["arms"]:
+            if arm["status"] == "running":
+                ls = launch_states.get(arm["name"])
+                if ls in ("finished", "failed", "cancelled"):
+                    arm["status"] = "finished" if ls == "finished" else ls
+        # 2. median rule over the RUNNING arms' histories
+        idx = RunIndex(self.results_dir.parent, ckpt_root=self.checkpoints_dir)
+        metric = str(state.get("metric", "eval/return"))
+        histories = {}
+        for arm in state["arms"]:
+            if arm["status"] == "running":
+                m = idx.get_metric(str(arm["name"]), metric)
+                histories[arm["name"]] = list(zip(m.get("steps", []), m.get("values", [])))
+        stops = decide_stops(histories, mode=str(state.get("mode", "max")),
+                             min_points=int(state.get("min_points", 3)),
+                             min_arms=int(state.get("min_arms", 3)))
+        acts = next_actions(state, stops)
+        # 3. apply: cancel losers, launch queued
+        by_name = {a["name"]: a for a in state["arms"]}
+        for run in acts["stop"]:
+            try:
+                self.launcher.cancel(run)
+            except Exception:  # noqa: BLE001 — a dead process is already stopped
+                pass
+            by_name[run]["status"] = "stopped"
+        launched = []
+        for run in acts["launch"]:
+            arm = by_name[run]
+            r = self.submit_spec({"model_spec": arm["spec"],
+                                  "seed": arm["spec"].get("seed", 0)})
+            arm["status"] = "running" if r.get("accepted") else "failed"
+            if r.get("accepted"):
+                launched.append(run)
+        store.save(name, state)
+        _log("search.tick", name=name, launched=len(launched),
+             stopped=len(acts["stop"]), done=acts["done"])
+        return {"name": name, "found": True, "launched": launched,
+                "stopped": acts["stop"], "done": acts["done"],
+                "arms": self._arms_lite(state)}
+
     # ---- dispatch: request -> reply, echoing id ----
     def dispatch(self, msg: dict) -> dict:
         type_ = msg.get("type", "")
@@ -466,6 +597,12 @@ class StudioBridgeServer:
                 since = 0
             return make(PULL_LOG,
                         self.launcher.tail(str(data.get("run", "")), since), id_)
+        if type_ == SEARCH_SUBMIT:
+            return make(SEARCH_SUBMIT, self.search_submit(data), id_)
+        if type_ == SEARCH_STATUS:
+            return make(SEARCH_STATUS, self.search_status(data), id_)
+        if type_ == SEARCH_TICK:
+            return make(SEARCH_TICK, self.search_tick(data), id_)
         if type_ == RUN_CANCEL:
             return make(RUN_CANCEL,
                         self.launcher.cancel(str(data.get("run", ""))), id_)
