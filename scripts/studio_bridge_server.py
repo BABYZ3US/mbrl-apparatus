@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import socket
 import struct
 import subprocess
@@ -85,8 +84,6 @@ PULL_LAUNCHED = "pull.launched"
 PULL_LOG = "pull.log"
 RUN_CANCEL = "run.cancel"
 ERROR = "error"
-
-_SEED_SUFFIX = re.compile(r"-s\d+$")   # group naming matches scripts/status.py
 
 # Authored experiment yamls land here (gitignored authoring dir, NOT configs/ —
 # another agent owns configs/). Hydra is pointed at it via a search-path append
@@ -153,20 +150,6 @@ class FrameDecoder:
 
 
 # ---------------- viz scanning (read-only over results / checkpoints) --------
-# DEPRECATED (v0.1 cleanup): list_runs/scan_runs predate the canonical RunIndex reader
-# and derive a run's group with a name-regex ONLY (no meta.json), and return a thinner
-# shape (no n_points/keys). dispatch(pull.runs) now routes through RunIndex instead.
-# These remain only for the legacy handle()/test_studio_bridge.py path — remove once
-# that test is migrated onto RunIndex (tracked in ARCH_RECOMMENDATIONS A8).
-def _last_step(rows: list[dict]) -> float | None:
-    for row in reversed(rows):
-        if "env_steps" in row:
-            return float(row["env_steps"])
-        if "step" in row:
-            return float(row["step"])
-    return None
-
-
 def _read_rows(metrics: Path) -> list[dict]:
     out = []
     for line in metrics.read_text().splitlines():
@@ -177,65 +160,6 @@ def _read_rows(metrics: Path) -> list[dict]:
             except json.JSONDecodeError:
                 pass  # torn write from a killed run; skip
     return out
-
-
-def list_runs(results_dir: Path) -> list[dict]:
-    """Runs found directly under `results_dir` (each having metrics.jsonl).
-
-    Kept for the original P2 contract where results_dir IS the runs dir.
-    scan_runs() is the richer two-source scan the server uses.
-    """
-    runs = []
-    if results_dir.exists():
-        for d in sorted(results_dir.iterdir()):
-            m = d / "metrics.jsonl"
-            if not m.exists():
-                continue
-            rows = _read_rows(m)
-            runs.append({
-                "name": d.name,
-                "group": _SEED_SUFFIX.sub("", d.name),
-                "last_step": _last_step(rows),
-            })
-    return runs
-
-
-def scan_runs(results_dir: Path, checkpoints_dir: Path,
-              group: str | None = None) -> list[dict]:
-    """Union of runs visible under results/runs and checkpoints/.
-
-    A run is a directory name; its last_step comes from metrics.jsonl if present
-    (checkpoint-only runs report last_step=None). Defensive: missing dirs yield
-    nothing rather than raising. `group` filters by the seed-stripped arm name.
-    """
-    found: dict[str, dict] = {}
-
-    if results_dir.exists():
-        for d in sorted(results_dir.iterdir()):
-            if not d.is_dir():
-                continue
-            m = d / "metrics.jsonl"
-            last = _last_step(_read_rows(m)) if m.exists() else None
-            found[d.name] = {
-                "name": d.name,
-                "group": _SEED_SUFFIX.sub("", d.name),
-                "last_step": last,
-            }
-
-    if checkpoints_dir.exists():
-        for d in sorted(checkpoints_dir.iterdir()):
-            if not d.is_dir():
-                continue
-            found.setdefault(d.name, {
-                "name": d.name,
-                "group": _SEED_SUFFIX.sub("", d.name),
-                "last_step": None,
-            })
-
-    runs = list(found.values())
-    if group:
-        runs = [r for r in runs if r["group"] == group]
-    return runs
 
 
 def _read_metric_jsonl(results_dir: Path, run: str, key: str,
@@ -293,31 +217,9 @@ def read_metric_since(results_dir: Path, run: str, key: str, since: float) -> di
     return _read_metric_jsonl(results_dir, run, key, since=since)
 
 
-# ---------------- legacy pure dispatch (P2 viz only) ----------------
-def handle(msg: dict, results_dir: Path) -> dict:
-    """Legacy P2 handler: viz path only, submit/env/infer -> not_implemented.
-
-    Kept so the original framing/viz test (tests/test_studio_bridge.py) stays
-    valid. The launcher lives on StudioBridgeServer.dispatch(), which is what
-    main()/serve_forever() use. `results_dir` here IS the runs directory.
-    """
-    type_ = msg.get("type", "")
-    data = msg.get("data", {})
-    id_ = msg.get("id", 0)
-
-    if type_ == HELLO:
-        return make(HELLO, {"version": VERSION}, id_)
-    if type_ == PULL_RUNS:
-        return make(PULL_RUNS, {"runs": list_runs(results_dir)}, id_)
-    if type_ == PULL_METRIC:
-        return make(PULL_METRIC, read_metric(
-            results_dir, str(data.get("run", "")), str(data.get("key", ""))), id_)
-    if type_ in (ENV_RESET, ENV_STEP, ENV_SPEC, SUBMIT_SPEC, INFER_LOAD, INFER_RUN):
-        return make(ERROR, {"code": "not_implemented",
-                            "message": f"{type_} is not served by handle(); use "
-                                       "StudioBridgeServer.dispatch()"}, id_)
-    return make(ERROR, {"code": "unknown_type", "message": type_}, id_)
-
+# (A8 2026-06-09: the legacy pure handle() + list_runs/scan_runs are DELETED —
+# one server, one read path. dispatch() below is the only request->reply map;
+# tests/test_studio_bridge.py now exercises it directly.)
 
 # ---------------- the server: author + launch + viz over one socket ----------
 def _log(event: str, **fields) -> None:
@@ -483,11 +385,9 @@ class StudioBridgeServer:
             return make(HELLO, {"version": VERSION}, id_)
 
         if type_ == PULL_RUNS:
-            # v0.1 cleanup: route through the ONE canonical reader (RunIndex) —
-            # group = meta.json["group"] else seed-stripped name, plus the richer
-            # {n_points, keys} shape the contract pins. include_checkpoints unions
-            # checkpoint-only runs (the old scan_runs behavior). scan_runs/list_runs
-            # are now legacy (see the deprecation note above their definitions).
+            # the ONE canonical reader (RunIndex): group = meta.json["group"] else
+            # seed-stripped name; {n_points, keys} per the contract;
+            # include_checkpoints unions checkpoint-only runs.
             idx = RunIndex(self.results_dir.parent, ckpt_root=self.checkpoints_dir)
             runs = idx.list_runs(group=data.get("group") or None,
                                  include_checkpoints=True)

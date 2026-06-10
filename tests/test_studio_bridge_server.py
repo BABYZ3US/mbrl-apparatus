@@ -272,7 +272,9 @@ def test_pull_metric_falls_back_to_jsonl_when_no_db(tmp_path):
     assert reply2["data"]["values"] == [-200.0]
 
 
-def test_scan_runs_unions_results_and_checkpoints(tmp_path):
+def test_pull_runs_unions_results_and_checkpoints(tmp_path):
+    # A8: the union behavior lives in dispatch(pull.runs) -> RunIndex
+    # (include_checkpoints=True); the legacy scan_runs is deleted.
     runs = tmp_path / "results" / "runs"
     ckpt = tmp_path / "checkpoints"
     (runs / "champion-Pendulum-v1-s0").mkdir(parents=True)
@@ -281,13 +283,14 @@ def test_scan_runs_unions_results_and_checkpoints(tmp_path):
     # a checkpoint-only run (no metrics yet) still shows up, last_step=None
     (ckpt / "champion-Pendulum-v1-s1" / "abcd").mkdir(parents=True)
 
-    out = {r["name"]: r for r in sb.scan_runs(runs, ckpt)}
-    assert out["champion-Pendulum-v1-s0"]["last_step"] == 2000.0
+    srv = sb.StudioBridgeServer(repo_root=tmp_path, dry_run=True)
+    out = {r["name"]: r for r in srv.dispatch(sb.make(sb.PULL_RUNS, {}, 1))["data"]["runs"]}
+    assert float(out["champion-Pendulum-v1-s0"]["last_step"]) == 2000.0
     assert out["champion-Pendulum-v1-s0"]["group"] == "champion-Pendulum-v1"
     assert out["champion-Pendulum-v1-s1"]["last_step"] is None
     # group filter narrows to the arm
-    filt = sb.scan_runs(runs, ckpt, group="champion-Pendulum-v1")
-    assert len(filt) == 2
+    filt = srv.dispatch(sb.make(sb.PULL_RUNS, {"group": "champion-Pendulum-v1"}, 2))
+    assert len(filt["data"]["runs"]) == 2
 
 
 # ---------------- end-to-end over a REAL loopback socket ----------------
