@@ -85,3 +85,17 @@ def test_write_surface_json_roundtrip(tmp_path):
     p = sx.write_surface_json(payload, tmp_path, "r", 2000)
     assert p.name == "surface_s2000.json"
     assert json.loads(p.read_text())["n"] == 5
+
+
+def test_export_surface_pins_the_spectrum_field():
+    """A7: the stored payload MUST carry "spectrum" (descending Hessian eigs at
+    the center) — viz_ablation reads exactly this key off pull.surface."""
+    import torch
+    from mbrl.viz.surface_export import export_surface
+
+    A = torch.diag(torch.tensor([3.0, 1.0, -2.0]))
+    f = lambda x: (x @ A * x).sum(-1)          # Hessian = 2A
+    payload = export_surface(f, torch.zeros(3), n=9)
+    spec = payload["spectrum"]
+    assert spec == sorted(spec, reverse=True)
+    assert [round(v, 4) for v in spec] == [6.0, 2.0, -4.0]

@@ -419,8 +419,16 @@ class StudioBridgeServer:
             return make(PULL_ARTIFACTS,
                         {"artifacts": idx.list_artifacts(str(data.get("run", "")))}, id_)
         if type_ == PULL_SURFACE:
+            # A7: Godot sends step=-1 for "latest" (bridge.gd pull_surface default);
+            # SurfaceIndex wants None for latest — normalize, else -1 exact-matches
+            # nothing and the live panel always gets {}.
+            step_v = data.get("step")
+            try:
+                step_n = None if step_v is None or int(step_v) < 0 else int(step_v)
+            except (TypeError, ValueError):
+                step_n = None
             surf = SurfaceIndex(self.results_dir.parent).get_surface(
-                str(data.get("run", "")), data.get("step"))
+                str(data.get("run", "")), step_n)
             return make(PULL_SURFACE, surf, id_)
         if type_ == SUBMIT_SWEEP:
             return make(SUBMIT_SWEEP, self.submit_sweep(data), id_)

@@ -119,6 +119,10 @@ def export_surface(f: RewardFn, center: Tensor, *, plane=(0, 1),
         "n": int(n),
         "step": step,
         "run": run,
+        # PINNED for the Studio's ablation panel (A7): reward-Hessian eigenvalues
+        # at the slice center, DESCENDING — viz_ablation reads reply["spectrum"].
+        # One Hessian eval; d = dim(z, a[, tau]) is small.
+        "spectrum": hessian_spectrum(f, center).tolist(),
     }
 
 

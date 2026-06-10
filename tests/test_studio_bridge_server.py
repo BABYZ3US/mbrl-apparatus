@@ -348,3 +348,17 @@ def test_end_to_end_submit_spec_dryrun_over_real_socket(tmp_path):
         cli.close()
     finally:
         srv.stop()
+
+
+def test_pull_surface_step_minus_one_means_latest(tmp_path):
+    """A7 regression: Godot's step=-1 (bridge.gd default) must resolve to the
+    LATEST surface, not exact-match nothing and return {}."""
+    sdir = tmp_path / "results" / "runs" / "r-s0" / "surfaces"
+    sdir.mkdir(parents=True)
+    (sdir / "surface_s100.json").write_text(json.dumps({"step": 100, "z": [[1]]}))
+    (sdir / "surface_s200.json").write_text(json.dumps({"step": 200, "z": [[2]]}))
+    srv = sb.StudioBridgeServer(repo_root=tmp_path, dry_run=True)
+    reply = srv.dispatch(sb.make(sb.PULL_SURFACE, {"run": "r-s0", "step": -1}, 3))
+    assert reply["data"].get("step") == 200
+    exact = srv.dispatch(sb.make(sb.PULL_SURFACE, {"run": "r-s0", "step": 100}, 4))
+    assert exact["data"].get("step") == 100
