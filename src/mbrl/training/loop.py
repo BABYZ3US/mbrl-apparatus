@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ..models import (Encoder, EMAEncoder, VAEEncoder, AffineDynamics,
+from ..models import (Encoder, EMAEncoder, VAEEncoder, CustomEncoder, AffineDynamics,
                       GaussianAffineDynamics, FullMLPDynamics, RewardModel,
                       Policy, ValueFn)
 from ..models.ensemble import EnsembleAffineDynamics
@@ -42,9 +42,19 @@ class Trainer:
         h, d = cfg.model.hidden, cfg.model.depth
         # encoder: "mlp" (deterministic, default) or "vae" (run 10 —
         # recon + KL grounding; latent near-stationary under the KL pull)
-        self.enc_vae = str(cfg.model.get("encoder", "mlp")) == "vae"
-        enc_cls = VAEEncoder if self.enc_vae else Encoder
-        self.encoder = enc_cls(obs_dim, k, h, d).to(device)
+        _enc_kind = str(cfg.model.get("encoder", "mlp"))
+        self.enc_vae = _enc_kind == "vae"
+        if _enc_kind == "custom":
+            # W7 WIRED (2026-06-10): the Studio's NN-brick chain becomes the
+            # encoder trunk (net_builder); a projection head pins z to k-dim.
+            _net = [dict(l) for l in (cfg.model.get("encoder_net", []) or [])]
+            if not _net:
+                raise ValueError("model.encoder=custom requires a non-empty "
+                                 "model.encoder_net (wire an NN-layer chain)")
+            self.encoder = CustomEncoder(obs_dim, k, _net).to(device)
+        else:
+            enc_cls = VAEEncoder if self.enc_vae else Encoder
+            self.encoder = enc_cls(obs_dim, k, h, d).to(device)
         self.vae_beta = float(cfg.model.get("vae", {}).get("beta", 1e-3))
         self.vae_recon_w = float(cfg.model.get("vae", {}).get("recon_weight", 1.0))
         self.ema = EMAEncoder(self.encoder, cfg.model.ema_decay)

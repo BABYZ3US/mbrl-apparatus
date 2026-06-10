@@ -60,11 +60,12 @@ def test_rejections_are_loud():
         build_net([])
 
 
-def test_validator_warns_on_unconsumed_custom_encoder():
+def test_validator_accepts_consumed_custom_encoder():
+    # W7 arm landed: encoder_net IS consumed (test_custom_encoder_arm) — a
+    # populated custom encoder warns nothing; an empty chain still does.
     from mbrl.studio.spec_validator import validate_spec
     spec = {"model": {"encoder": "custom",
                       "encoder_net": [{"kind": "linear", "out_features": 8}]}}
-    warns = validate_spec(spec)
-    assert any("not yet consumed" in w and "custom" in w for w in warns)
+    assert not any("not yet consumed" in w for w in validate_spec(spec))
     warns2 = validate_spec({"model": {"encoder": "custom"}})
     assert any("encoder_net is empty" in w for w in warns2)

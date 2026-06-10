@@ -103,10 +103,6 @@ def validate_spec(spec: dict) -> list[str]:
         if not list(model.get("encoder_net", []) or []):
             warns.append("model.encoder=custom but encoder_net is empty — wire an "
                          "NN-layer chain into the encoder's net pin")
-        else:
-            warns.append("model.encoder=custom (net_builder) is implemented + tested "
-                         "apparatus-side but not yet consumed by the Trainer — the run "
-                         "trains with the default encoder")
     spectral = _as_dict(spec.get("spectral"))
     if not bool(spectral.get("enabled", False)):
         return warns  # non-spectral path: house rules don't apply

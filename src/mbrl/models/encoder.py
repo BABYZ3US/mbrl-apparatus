@@ -37,6 +37,33 @@ class Encoder(nn.Module):
         return self.net(obs)
 
 
+class CustomEncoder(nn.Module):
+    """W7 consumption arm: the trunk is BUILT FROM the Studio's NN-brick chain
+    (model.encoder_net, a declarative layer list -> net_builder), followed by a
+    projection head (LazyLinear(k) + LayerNorm(k)) that GUARANTEES the latent
+    contract — z is k-dim and scale-normalized whatever the chain emits.
+
+    Lazy parameters materialize HERE via a dry eval-mode forward (batch 2, so
+    batch_norm has stats), which makes EMAEncoder's deepcopy see real tensors.
+    NOTE: this apparatus feeds FLAT observations (B, obs_dim) — a conv-first
+    chain raises loudly at construction (conv wants spatial input; image obs
+    are future env work, not silently faked)."""
+
+    def __init__(self, obs_dim: int, latent_dim: int = 4, layers: list | None = None):
+        from .net_builder import build_net
+        super().__init__()
+        self.trunk = build_net([dict(l) for l in (layers or [])])
+        self.head = nn.Sequential(nn.LazyLinear(latent_dim), nn.LayerNorm(latent_dim))
+        self.latent_dim = latent_dim
+        self.eval()
+        with torch.no_grad():
+            self.forward(torch.zeros(2, obs_dim))   # materialize lazies (deepcopy-safe)
+        self.train()
+
+    def forward(self, obs: Tensor) -> Tensor:
+        return self.head(self.trunk(obs))
+
+
 class VAEEncoder(nn.Module):
     """Run-10 encoder: q(z|obs) = N(mu, diag sigma^2) + MLP decoder.
 
