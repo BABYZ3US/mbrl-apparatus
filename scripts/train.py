@@ -80,8 +80,9 @@ def main(cfg: DictConfig):
     seed_everything(cfg.seed)
 
     run = init_wandb(cfg, job_type="train")
+    local_run_name = f"{cfg.experiment.name}-{cfg.env.name}-s{cfg.seed}"
     local_log = MetricsLogger(cfg.logging.dir,
-                              f"{cfg.experiment.name}-{cfg.env.name}-s{cfg.seed}",
+                              local_run_name,
                               meta={"group": cfg.experiment.name, "env": cfg.env.name,
                                     "seed": cfg.seed},
                               config=OmegaConf.to_container(cfg, resolve=True))
@@ -151,6 +152,11 @@ def main(cfg: DictConfig):
                     metrics["eval/video"] = wandb.Video(
                         np.stack(frames).transpose(0, 3, 1, 2),
                         fps=30, format="mp4")
+                    # W11: the SAME frames as a LOCAL artifact (GIF + manifest
+                    # entry) so the Studio's Artifacts panel can browse + open it
+                    from mbrl.eval import save_eval_media
+                    save_eval_media(frames, Path(cfg.logging.dir),
+                                    local_run_name, env_steps)
                 except Exception as e:  # noqa: BLE001
                     if not video_warned:
                         print(f"[warn] eval video logging failed ({e!r}); "
