@@ -45,7 +45,10 @@ for stack in mlp spectral champion; do
 			throttle
 			tag="dg-${stack}-${gate}"
 			log="results/gridlogs/${tag}-s${s}.log"
-			gpu=$((arm_idx % NGPU)); arm_idx=$((arm_idx + 1))
+			# PIN_GPU forces every arm onto one physical GPU (e.g. add a
+			# seed batch on the idle GPU beside a running campaign); else
+			# round-robin across NGPU.
+			gpu="${PIN_GPU:-$((arm_idx % NGPU))}"; arm_idx=$((arm_idx + 1))
 			echo "launching ${tag} seed ${s} (steps=${STEPS}) on GPU ${gpu} -> ${log}"
 			ov=""; [ "$exp" != none ] && ov="+experiment=${exp}"
 			OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 CUDA_VISIBLE_DEVICES="$gpu" \
