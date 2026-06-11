@@ -46,11 +46,15 @@ def export_policy(trainer, obs_dim: int, out_path, *, results_root=None,
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     dummy = torch.zeros(1, int(obs_dim))
+    kwargs = dict(input_names=["obs"], output_names=["action"],
+                  dynamic_axes={"obs": {0: "batch"}, "action": {0: "batch"}})
     with torch.no_grad():
-        torch.onnx.export(actor, dummy, str(out),
-                          input_names=["obs"], output_names=["action"],
-                          dynamic_axes={"obs": {0: "batch"}, "action": {0: "batch"}},
-                          dynamo=False)
+        try:
+            # torch >= 2.6: pin the legacy TorchScript exporter explicitly
+            torch.onnx.export(actor, dummy, str(out), dynamo=False, **kwargs)
+        except TypeError:
+            # torch 2.4/2.5 (the uv.lock pin): no `dynamo` kwarg; legacy IS the default
+            torch.onnx.export(actor, dummy, str(out), **kwargs)
     import onnx
     onnx.checker.check_model(onnx.load(str(out)))
     if was_training:
