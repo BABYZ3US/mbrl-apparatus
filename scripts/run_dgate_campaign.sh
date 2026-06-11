@@ -24,6 +24,7 @@ NGPU="${NGPU:-$(nvidia-smi -L 2>/dev/null | grep -c GPU)}"
 JOBS="${JOBS:-$((4 * NGPU))}"
 STEPS="${STEPS:-250000}"
 SEEDS="${SEEDS:-0 1}"
+STACKS="${STACKS:-mlp spectral champion}"
 # Network capacity (24GB VRAM, ~2GB used -> huge headroom). DEPTH/HIDDEN
 # default to "" = the per-stack config's own values (comparable to prior runs);
 # set them to deepen/widen every arm uniformly.
@@ -42,7 +43,7 @@ declare -A EXP=( [mlp]="none" [spectral]="spectral_ladder" [champion]="champion"
 throttle() { while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 5; done; }
 
 pids=()
-for stack in mlp spectral champion; do
+for stack in $STACKS; do
 	exp="${EXP[$stack]}"
 	for gate in off on; do
 		flag=$([ "$gate" = on ] && echo true || echo false)
