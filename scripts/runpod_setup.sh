@@ -16,13 +16,13 @@ uv sync --extra dev --frozen || uv sync --extra dev
 echo "== CUDA check =="
 if ! .venv/bin/python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
 	echo "lock wheels are CPU-only here — overlaying CUDA torch (cu124)"
-	.venv/bin/pip install --index-url https://download.pytorch.org/whl/cu124 torch --upgrade
+	uv pip install --index-url https://download.pytorch.org/whl/cu124 torch --upgrade
 	.venv/bin/python -c "import torch; print('cuda:', torch.cuda.is_available(), torch.version.cuda)"
 fi
 .venv/bin/python -c "import torch; print('torch', torch.__version__, '| cuda', torch.cuda.is_available(), '| dev', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
 
 echo "== MuJoCo envs =="
-.venv/bin/pip install -q "gymnasium[mujoco]"
+uv pip install -q "gymnasium[mujoco]"   # uv venvs ship no pip (pod run 1)
 .venv/bin/python -c "import gymnasium as g; e=g.make('HalfCheetah-v5'); e.reset(seed=0); e.close(); print('HalfCheetah OK')"
 
 echo "== W&B =="
