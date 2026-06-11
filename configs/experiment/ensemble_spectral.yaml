@@ -31,6 +31,23 @@ spectral:
     degrees: [1, 3]                # high-clamp shape (run-3 winner)
     coefs: [0.1, 10.0]
     shifts: [0, 0]
+# CAMPAIGN 2 RESULT (2026-06-11, RunPod 3090, HalfCheetah@100k, 6/6 arms,
+# {p=0, p=1.0} x 3 seeds; receipts results/runs/ens2-p*):
+#   final eval/return: p00 -253+/-82 | p10 -188+/-82  (p10-p00 = +65, t~0.96, NS)
+#   DIRECTION REPLICATES (p10 > p00 on the spectral stack too, as in campaign 1
+#     +151) but WEAKER and not significant at n=3; combined read = pessimism
+#     nominally helps eval on both reward stacks, never hurts, effect at the edge
+#     of noise.
+#   Spectral reward is the better stack outright: MLP->spectral lifts p00 +142,
+#     p10 +56 (the champion-reward lore, confirmed in-loop).
+#   MECHANISM NOT SUPPORTED: the de-confound worked (p00 late return_var = 474,
+#     sane, vs campaign-1's 1e8-1e10 symexp tail), but pessimism does NOT lower
+#     imagined-return variance on the clean stack -- p10 late return_var ~1e12
+#     (seed-outlier-dominated) >> p00's 474, while the penalty's OWN variance is
+#     tiny (pvar 0.17). PLAN row 11's variance-suppression clause is FALSIFIED in
+#     mechanism; the eval gain (such as it is) is not via that pathway.
+#   NEXT: if pursuing the eval claim, more seeds on {p00, p10} for power; DROP the
+#     variance-suppression framing.
 algo:
   dynamics_ensemble: 5
   ensemble_pessimism: 1.0          # campaign 1 winner (2026-06-11): -244±108 vs control -395±77 (n=3, suggestive not significant)
