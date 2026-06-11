@@ -158,9 +158,14 @@ def main(cfg: DictConfig):
                     save_eval_media(frames, Path(cfg.logging.dir),
                                     local_run_name, env_steps)
                 except Exception as e:  # noqa: BLE001
+                    # DISABLE, don't just silence: retrying a failed GL init
+                    # re-enters corrupted GLFW static state and dies as a
+                    # libc++abi ABORT (uncatchable) — the uniform 39k-step
+                    # grid killer on the headless pod, 2026-06-11
+                    video_enabled = False
                     if not video_warned:
-                        print(f"[warn] eval video logging failed ({e!r}); "
-                              "training continues without videos")
+                        print(f"[warn] eval video failed ({e!r}); video DISABLED "
+                              "for this run — headless GL cannot recover")
                         video_warned = True
         # ---- M4: optional reward-surface + Hessian-spectrum export. OFF by
         # default; enable with `+viz.surface_every=N` (iterations). Writes a

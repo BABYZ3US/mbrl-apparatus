@@ -649,7 +649,7 @@ class Trainer:
         ent_coef = cfg_i.get("entropy_coef", 3e-4)
 
         # --- differentiable imagination (gradients flow through T and R) ---
-        zs, rs, logps, dis = [z0], [], [], []
+        zs, rs, logps, dis, pens = [z0], [], [], [], []
         z = z0
         for _ in range(H):
             a, logp = self.policy.sample(z, tau0)
@@ -659,11 +659,21 @@ class Trainer:
             if self.dyn_ensemble and self.ens_pessimism > 0.0:
                 # epistemic discount (PETS/MBPO-style): distrust imagined reward
                 # where the dynamics ensemble disagrees about the transition
-                r_im = r_im - self.ens_pessimism * self.dynamics.disagreement(zs[-2], a)
+                pen = self.ens_pessimism * self.dynamics.disagreement(zs[-2], a)
+                r_im = r_im - pen
+                pens.append(pen.detach())
             rs.append(r_im)
             dis.append(d)
             logps.append(logp)
         zs = torch.stack(zs)                      # (H+1, B, k)
+        # campaign-1 instrumentation lesson: imagine/return_var conflates the
+        # discount's own variance with model-exploitation — log the penalty
+        # stream separately so the two are decomposable
+        pen_stats = {}
+        if pens:
+            pen_t = torch.stack(pens)
+            pen_stats = {"imagine/penalty_mean": pen_t.mean().item(),
+                         "imagine/penalty_var": pen_t.var().item()}
         rs = smooth_rewards(torch.stack(rs), self.cfg.smoothing)  # (H, B)
         logps = torch.stack(logps)                # (H, B)
 
@@ -723,7 +733,8 @@ class Trainer:
                 "model/reward_disagreement": torch.stack(dis).mean().item(),
                 "imagine/horizon": H,
                 "imagine/return_mean": returns.mean().item(),
-                "imagine/return_var": returns.var().item()}  # R15 diagnostic
+                "imagine/return_var": returns.var().item(),  # R15 diagnostic
+                **pen_stats}
 
     @torch.no_grad()
     def imagine(self, z0: torch.Tensor, horizon: int, tau0: torch.Tensor | None = None):

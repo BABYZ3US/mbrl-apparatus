@@ -39,6 +39,7 @@ for p in 0.0 0.25 0.5 1.0; do
 		OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
 		$PY scripts/train.py +experiment=ensemble env=halfcheetah seed="$s" \
 			experiment.name="$tag" algo.ensemble_pessimism="$p" \
+			logging.video.enabled=false \
 			hydra.run.dir="outputs/${tag}-s${s}" \
 			> "$log" 2>&1 &
 		pids+=($!)
