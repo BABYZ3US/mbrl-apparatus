@@ -9,15 +9,23 @@
 # convergence time). Each arm: distinct experiment.name -> own W&B group + mirror;
 # checkpoint-resumable.
 #
+# Multi-GPU: arms round-robin across the visible GPUs via CUDA_VISIBLE_DEVICES
+# (train.py device=auto sees only its assigned GPU as cuda:0 — no code change);
+# default JOBS = 4 per GPU (a 3090 is compute-bound at ~4 of these small-net
+# arms; more per GPU just slows each).
+#
 # Usage: bash scripts/run_dgate_campaign.sh
-#   STEPS=500000 SEEDS="0 1 2" JOBS=4 bash scripts/run_dgate_campaign.sh
+#   STEPS=500000 SEEDS="0 1 2" JOBS=8 NGPU=2 bash scripts/run_dgate_campaign.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-JOBS="${JOBS:-4}"
+NGPU="${NGPU:-$(nvidia-smi -L 2>/dev/null | grep -c GPU)}"
+[ "${NGPU:-0}" -lt 1 ] && NGPU=1
+JOBS="${JOBS:-$((4 * NGPU))}"
 STEPS="${STEPS:-250000}"
 SEEDS="${SEEDS:-0 1}"
 PY=".venv/bin/python"
+arm_idx=0
 mkdir -p results/gridlogs
 if [ -z "${WANDB_API_KEY:-}" ] && [ -f .wandb_key ]; then
 	export WANDB_API_KEY="$(cat .wandb_key)"
@@ -37,9 +45,10 @@ for stack in mlp spectral champion; do
 			throttle
 			tag="dg-${stack}-${gate}"
 			log="results/gridlogs/${tag}-s${s}.log"
-			echo "launching ${tag} seed ${s} (steps=${STEPS}) -> ${log}"
+			gpu=$((arm_idx % NGPU)); arm_idx=$((arm_idx + 1))
+			echo "launching ${tag} seed ${s} (steps=${STEPS}) on GPU ${gpu} -> ${log}"
 			ov=""; [ "$exp" != none ] && ov="+experiment=${exp}"
-			OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+			OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 CUDA_VISIBLE_DEVICES="$gpu" \
 			$PY scripts/train.py $ov env=halfcheetah seed="$s" \
 				experiment.name="$tag" \
 				penalty.disagreement_gate.enabled="$flag" \
@@ -54,7 +63,7 @@ for stack in mlp spectral champion; do
 done
 
 n=${#pids[@]}
-echo "all ${n} arms launched (max ${JOBS} concurrent, steps=${STEPS}) — waiting…"
+echo "all ${n} arms launched (max ${JOBS} concurrent across ${NGPU} GPU(s), steps=${STEPS}) — waiting…"
 fail=0
 for pid in "${pids[@]}"; do wait "$pid" || fail=$((fail + 1)); done
 echo "dgate campaign done: $((n - fail))/${n} succeeded"
