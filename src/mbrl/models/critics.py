@@ -72,11 +72,19 @@ class SquashedGaussianPolicy(nn.Module):
         std = log_std.exp()
         u = mu + std * torch.randn_like(mu)            # rsample: gradients flow
         a = torch.tanh(u)
-        # log pi(a) = log N(u | mu, std) - sum_i log(1 - tanh(u_i)^2)
+        # ALGORITHM REVIEW 2026-06-11: mirror the WIRED policy (models/policy.py)
+        # exactly — the numerically stable tanh log-det
+        #   log(1 - tanh(u)^2) = 2*(log2 - u - softplus(-2u))
+        # (the eps-clamped log(1-a^2+eps) loses precision for |u| >~ 6), AND the
+        # action_scale Jacobian (a_out = tanh(u)*s adds -sum_i log s) that the
+        # old form omitted while claiming an exact log-prob.
         base = -0.5 * (((u - mu) / std) ** 2 + 2 * log_std + torch.log(
             torch.tensor(2.0 * torch.pi, device=u.device, dtype=u.dtype)))
-        corr = torch.log(1.0 - a.pow(2) + _EPS)
-        logp = (base - corr).sum(dim=-1)
+        log_det = 2.0 * (torch.log(torch.tensor(2.0, device=u.device, dtype=u.dtype))
+                         - u - torch.nn.functional.softplus(-2.0 * u))
+        logp = (base - log_det).sum(dim=-1) \
+            - mu.shape[-1] * torch.log(torch.tensor(self.action_scale + 1e-12,
+                                                    device=u.device, dtype=u.dtype))
         return a * self.action_scale, logp
 
     def deterministic(self, z: Tensor, tau: Tensor | None = None) -> Tensor:

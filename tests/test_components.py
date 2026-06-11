@@ -55,12 +55,35 @@ def test_squashed_logprob_matches_change_of_variables():
     torch.manual_seed(7)                       # freeze the rsample noise
     eps = torch.randn_like(mu)
     u = mu + std * eps
-    a = torch.tanh(u)
     base = -0.5 * (eps ** 2 + 2 * log_std + math.log(2 * math.pi))
-    want = (base - torch.log(1 - a ** 2 + 1e-6)).sum(-1)
+    # the stable tanh log-det identity (review 2026-06-11; scale=1 -> no Jacobian)
+    log_det = 2.0 * (math.log(2.0) - u - torch.nn.functional.softplus(-2.0 * u))
+    want = (base - log_det).sum(-1)
     torch.manual_seed(7)                       # same noise inside sample()
     _, logp = pi.sample(z)
     assert torch.allclose(logp, want, atol=1e-5)
+
+
+def test_squashed_logprob_scale_jacobian_and_stability():
+    """a = tanh(u)*s: log-prob carries -d*log(s); and the stable form stays
+    finite where the clamped form saturates (|u| large)."""
+    torch.manual_seed(0)
+    d = 2
+    pi1 = SquashedGaussianPolicy(latent_dim=3, action_dim=d, hidden=8, depth=1,
+                                 action_scale=1.0)
+    pi2 = SquashedGaussianPolicy(latent_dim=3, action_dim=d, hidden=8, depth=1,
+                                 action_scale=2.0)
+    pi2.load_state_dict(pi1.state_dict())      # identical nets, only scale differs
+    z = torch.randn(64, 3)
+    torch.manual_seed(11)
+    _, lp1 = pi1.sample(z)
+    torch.manual_seed(11)
+    _, lp2 = pi2.sample(z)
+    assert torch.allclose(lp1 - lp2, torch.full_like(lp1, d * math.log(2.0)), atol=1e-5)
+    # stability: a saturated pre-activation must yield a finite log-prob
+    big = torch.full((1, 3), 50.0)
+    _, lp = pi1.sample(big)
+    assert torch.isfinite(lp).all()
 
 
 def test_squashed_rsample_carries_gradients():

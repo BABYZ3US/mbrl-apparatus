@@ -1,0 +1,44 @@
+{
+ "hol": {
+  "rows": 149,
+  "ceiling": {
+   "struct": {
+    "colliding_rows": 24,
+    "rate": 0.1610738255033557
+   },
+   "content_named": {
+    "colliding_rows": 14,
+    "rate": 0.09395973154362416
+   },
+   "content_anon": {
+    "colliding_rows": 8,
+    "rate": 0.053691275167785234
+   },
+   "struct+content_anon": {
+    "colliding_rows": 7,
+    "rate": 0.04697986577181208
+   }
+  }
+ },
+ "ql": {
+  "rows": 1140,
+  "ceiling": {
+   "struct": {
+    "colliding_rows": 58,
+    "rate": 0.05087719298245614
+   },
+   "content_named": {
+    "colliding_rows": 157,
+    "rate": 0.13771929824561405
+   },
+   "content_anon": {
+    "colliding_rows": 190,
+    "rate": 0.16666666666666666
+   },
+   "struct+content_anon": {
+    "colliding_rows": 31,
+    "rate": 0.027192982456140352
+   }
+  }
+ }
+}
