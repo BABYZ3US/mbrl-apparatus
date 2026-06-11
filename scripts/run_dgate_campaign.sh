@@ -24,6 +24,11 @@ NGPU="${NGPU:-$(nvidia-smi -L 2>/dev/null | grep -c GPU)}"
 JOBS="${JOBS:-$((4 * NGPU))}"
 STEPS="${STEPS:-250000}"
 SEEDS="${SEEDS:-0 1}"
+# Network capacity (24GB VRAM, ~2GB used -> huge headroom). DEPTH/HIDDEN
+# default to "" = the per-stack config's own values (comparable to prior runs);
+# set them to deepen/widen every arm uniformly.
+DEPTH="${DEPTH:-}"
+HIDDEN="${HIDDEN:-}"
 PY=".venv/bin/python"
 arm_idx=0
 mkdir -p results/gridlogs
@@ -51,8 +56,10 @@ for stack in mlp spectral champion; do
 			gpu="${PIN_GPU:-$((arm_idx % NGPU))}"; arm_idx=$((arm_idx + 1))
 			echo "launching ${tag} seed ${s} (steps=${STEPS}) on GPU ${gpu} -> ${log}"
 			ov=""; [ "$exp" != none ] && ov="+experiment=${exp}"
+			cap=""; [ -n "$DEPTH" ] && cap="$cap model.depth=$DEPTH"
+			[ -n "$HIDDEN" ] && cap="$cap model.hidden=$HIDDEN"
 			OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 CUDA_VISIBLE_DEVICES="$gpu" \
-			$PY scripts/train.py $ov env=halfcheetah seed="$s" \
+			$PY scripts/train.py $ov $cap env=halfcheetah seed="$s" \
 				experiment.name="$tag" \
 				penalty.disagreement_gate.enabled="$flag" \
 				training.total_env_steps="$STEPS" \

@@ -156,6 +156,7 @@ class Trainer:
         self.dg_decay = float(dg.get("decay", 0.99)) if dg else 0.99
         self.dis_ema, self.dis_peak = None, 0.0  # checkpointed
         self.dg_gate_now = 1.0   # current gate factor (1.0 = disabled / full lam)
+        self._spec_head_dis = None  # spectral ensemble head-spread (checkpointed)
         if self.dg_enabled:
             _nh = int(cfg.model.get("reward_heads", 1))
             _sp = cfg.get("spectral", None)
@@ -461,8 +462,16 @@ class Trainer:
         # through auto-dose warmup). self.dg_gate_now stays 1.0 when disabled.
         dg_metrics = {}
         if self.dg_enabled:
-            with torch.no_grad():
-                d_dis = self.reward.all_heads(z.detach(), a, tau).std(0).mean().item()
+            # signal: on spectral stacks use the spectral ensemble's own head
+            # spread (set last step; tracks the SPECTRAL reward's convergence so
+            # the gate actually releases — the aux-MLP signal stayed pinned at
+            # 1.0, throttling bandwidth all run). Falls back to the MLP/reward
+            # heads (mlp stack, or spectral before the first refit builds heads).
+            if self.spec_enabled and self._spec_head_dis is not None:
+                d_dis = self._spec_head_dis
+            else:
+                with torch.no_grad():
+                    d_dis = self.reward.all_heads(z.detach(), a, tau).std(0).mean().item()
             import math as _mdg
             if _mdg.isfinite(d_dis):
                 self.dis_ema = (d_dis if self.dis_ema is None
@@ -498,9 +507,15 @@ class Trainer:
                 self._spectral_refit()
             with torch.no_grad():  # diagnostic only: ensemble-mean fit MSE
                 if self.spec_heads:
-                    pred = torch.stack([h.predict(x_spec)
-                                        for h in self.spec_heads]).mean(0)
+                    ph = torch.stack([h.predict(x_spec) for h in self.spec_heads])
+                    pred = ph.mean(0)
                     rew_loss_val = F.mse_loss(pred, r_target).item()
+                    # spectral ensemble's OWN head-spread — the disagreement
+                    # signal the gate uses on spectral stacks (read by the NEXT
+                    # step's early gate block; the aux-MLP-head signal does not
+                    # track the spectral reward's convergence -> never releases).
+                    if len(self.spec_heads) >= 2:
+                        self._spec_head_dis = ph.std(0).mean().item()
                 else:   # sigma_w=auto, pre-calibration: heads not built yet
                     rew_loss_val = float(r_target.pow(2).mean().item())
             if self.spec_sigma == "learned" and self.spec_refits > 0:
@@ -823,6 +838,7 @@ class Trainer:
                 "pen_ema": self.pen_ema, "pen_peak": self.pen_peak,
                 # disagreement-gate EMA state (bitwise resume)
                 "dis_ema": self.dis_ema, "dis_peak": self.dis_peak,
+                "spec_head_dis": self._spec_head_dis,
                 "hutchinson_gen": self.gen.get_state()}
         if self.spec_enabled:
             # spectral reward: per-head (W, b, c) + the rolling cache + refit
@@ -859,6 +875,7 @@ class Trainer:
         self.lam0_auto = sd.get("lam0_auto", None)
         self.dis_ema = sd.get("dis_ema", None)
         self.dis_peak = sd.get("dis_peak", 0.0)
+        self._spec_head_dis = sd.get("spec_head_dis", None)
         self.ad_count = sd.get("ad_count", 0)
         self.ad_fit_sum = sd.get("ad_fit_sum", 0.0)
         self.ad_pen_sum = sd.get("ad_pen_sum", 0.0)
