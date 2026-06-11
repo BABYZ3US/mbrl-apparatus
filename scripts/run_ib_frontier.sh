@@ -31,6 +31,10 @@ NGPU="${NGPU:-$(nvidia-smi -L 2>/dev/null | grep -c GPU)}"
 JOBS="${JOBS:-$((4 * NGPU))}"
 STEPS="${STEPS:-250000}"
 SEEDS="${SEEDS:-0 1 2}"
+# NOISE = obs-channel input noise σ. 0 = clean (representation channel is NOT a
+# bottleneck → frontier likely flat); >0 (e.g. 0.5) manufactures a real channel
+# bottleneck → the IB elbow should appear (the R14 denoising regime).
+NOISE="${NOISE:-0.0}"
 PY=".venv/bin/python"
 arm_idx=0
 mkdir -p results/gridlogs
@@ -57,7 +61,8 @@ for arm in ctl b00 b1em4 b1em3 b1em2 b1em1; do
 	ov="$(arm_override "$arm")"
 	for s in $SEEDS; do
 		throttle
-		tag="ib-${arm}"
+		nz=$(echo "$NOISE" | tr -d '.')
+		tag="ib-n${nz}-${arm}"
 		log="results/gridlogs/${tag}-s${s}.log"
 		gpu=$((arm_idx % NGPU)); arm_idx=$((arm_idx + 1))
 		echo "launching ${tag} seed ${s} (${STEPS} steps) on GPU ${gpu} -> ${log}"
@@ -65,6 +70,7 @@ for arm in ctl b00 b1em4 b1em3 b1em2 b1em1; do
 		$PY scripts/train.py +experiment=champion env=halfcheetah seed="$s" \
 			experiment.name="$tag" \
 			$ov \
+			+env.obs_noise="$NOISE" \
 			training.total_env_steps="$STEPS" \
 			logging.video.enabled=false \
 			hydra.run.dir="outputs/${tag}-s${s}" \

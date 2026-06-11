@@ -23,15 +23,30 @@ from mbrl.utils import CheckpointManager, seed_everything, init_wandb
 from mbrl.utils.metrics_logger import MetricsLogger
 
 
+def _obs_noise(cfg):
+    return float(cfg.env.get("obs_noise", 0.0) or 0.0)
+
+
 def make_env(cfg, num_envs: int):
     import gymnasium as gym
-    return gym.vector.AsyncVectorEnv(
-        [lambda: gym.make(cfg.env.name) for _ in range(num_envs)])
+    sigma = _obs_noise(cfg)
+
+    def one(i):
+        e = gym.make(cfg.env.name)
+        if sigma > 0.0:
+            from mbrl.envs.obs_noise import GaussianObsNoise
+            e = GaussianObsNoise(e, sigma, seed=int(cfg.seed) * 100 + i)
+        return e
+
+    return gym.vector.AsyncVectorEnv([lambda i=i: one(i) for i in range(num_envs)])
 
 
 def evaluate(trainer, cfg, device, episodes: int = 3) -> float:
     import gymnasium as gym
     env = gym.make(cfg.env.name)
+    if _obs_noise(cfg) > 0.0:   # eval through the SAME noisy channel
+        from mbrl.envs.obs_noise import GaussianObsNoise
+        env = GaussianObsNoise(env, _obs_noise(cfg), seed=int(cfg.seed) * 1000 + 7)
     total = 0.0
     for ep in range(episodes):
         obs, _ = env.reset(seed=cfg.seed * 1000 + ep)
