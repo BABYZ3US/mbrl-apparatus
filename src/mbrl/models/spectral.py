@@ -241,12 +241,16 @@ def snr_band_weights(Phi: Tensor, y: Tensor, omega_norms: Tensor,
     sigma_eff = center/sqrt(d) plus the interpolated sigma where SNR crosses 1
     (the user's hypothesis, 2026-06-08: crossing at sigma = 1)."""
     N, M = Phi.shape
-    perm = torch.randperm(N, generator=generator)
+    dev = Phi.device
+    # the seeded CPU generator is the resume-bitwise discipline — draw the
+    # permutation on CPU, MOVE it to the data device (first spectral-on-GPU
+    # run, campaign 2: three device-naive constructions crashed here)
+    perm = torch.randperm(N, generator=generator).to(dev)
     A, B = perm[: N // 2], perm[N // 2:]
 
-    w = torch.as_tensor(omega_norms, dtype=torch.float32)
-    edges = torch.quantile(w, torch.linspace(0, 1, n_bands + 1))
-    weights = torch.empty(M)
+    w = torch.as_tensor(omega_norms, dtype=torch.float32).to(dev)
+    edges = torch.quantile(w, torch.linspace(0, 1, n_bands + 1, device=dev))
+    weights = torch.empty(M, device=dev)
     centers, snrs = [], []
     # INCREMENTAL (residual) SNR, bands low -> high. The naive per-feature
     # split-half estimate is broken by feature correlation: a high-band
