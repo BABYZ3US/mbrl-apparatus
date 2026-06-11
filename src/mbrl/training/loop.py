@@ -669,10 +669,35 @@ class Trainer:
                             else self.ah_decay * self.pen_ema + (1 - self.ah_decay) * pen_val)
             self.pen_peak = max(self.pen_peak, self.pen_ema)
 
+        # ---- latent-as-channel diagnostics (rate-distortion / IB frontier) ----
+        # rate  = E KL(q_φ(z|x) ‖ N(0,I)) >= I(x;z)  (only defined for the VAE
+        #         stochastic channel; deterministic encoder is noiseless -> no rate).
+        # task-relevant capacities via the Gaussian-channel proxy ½ln(1+SNR):
+        #   I(z;r)  from the reward-fit SNR,  I(z;z') from the 1-step dynamics SNR.
+        # See docs/channel_capacity_formalization_2026-06-11.md.
+        info_metrics = {}
+        with torch.no_grad():
+            eps = 1e-8
+            snr_r = float(r_target.var().item()) / max(rew_loss_val, eps)
+            info_metrics["info/task_reward_nats"] = 0.5 * _math.log1p(max(snr_r, 0.0))
+            mu_pred = (self.dynamics.moments(z, a)[0] if self.dyn_stochastic
+                       else self.dynamics(z, a))           # deterministic mean (ensemble fwd = mean)
+            mse_dyn = float(F.mse_loss(mu_pred, z_next_tgt).item())
+            snr_d = float(z_next_tgt.var().item()) / max(mse_dyn, eps)
+            info_metrics["info/task_dyn_nats"] = 0.5 * _math.log1p(max(snr_d, 0.0))
+            info_metrics["info/dyn_mse"] = mse_dyn
+            if self.enc_vae:
+                rate = vae_metrics["vae/kl"]               # nats; >= I(x;z)
+                info_metrics["info/rate_nats"] = rate
+                info_metrics["info/rate_bits"] = rate / _math.log(2)
+                # IB efficiency: task-relevant capacity earned per representation bit
+                task = info_metrics["info/task_reward_nats"] + info_metrics["info/task_dyn_nats"]
+                info_metrics["info/ib_efficiency"] = task / max(rate, eps)
+
         out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss_val,
                "penalty/value": pen_val, "penalty/lambda": lam_t,
                "loss/total": loss.item(), "step": self.step, **spec_metrics,
-               **dyn_calib, **dg_metrics}
+               **dyn_calib, **dg_metrics, **info_metrics}
         if self.lam0_auto is not None:
             out["penalty/lam0_auto"] = self.lam0_auto
         return out
