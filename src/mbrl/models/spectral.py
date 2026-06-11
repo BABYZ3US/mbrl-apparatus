@@ -281,7 +281,7 @@ def snr_band_weights(Phi: Tensor, y: Tensor, omega_norms: Tensor,
         # small ridge solve on the band block only (Mb x Mb, trivial); the
         # ridge weight (N/M)/SNR IS the Wiener shrinkage — no extra factor
         cb = torch.linalg.solve(Pb.T @ Pb + (N / M) / max(snr, 1e-6)
-                                * torch.eye(Mb), Pb.T @ resid)
+                                * torch.eye(Mb, device=dev), Pb.T @ resid)
         resid = resid - Pb @ cb
     # |w| where SNR crosses 1 (log-linear interpolation between band centers).
     # sigma_eff = w_at_snr1 / sqrt(in_dim): |w| ~ sigma*sqrt(d) for N(0, s^2 I)
@@ -314,11 +314,13 @@ def calibrate_sigma_ladder(X: Tensor, y: Tensor, mults=(0.5, 1.0, 2.0, 4.0),
     import math as _math
 
     X = torch.as_tensor(X, dtype=torch.float32)
-    y = torch.as_tensor(y, dtype=torch.float32)
+    y = torch.as_tensor(y, dtype=torch.float32).to(X.device)
     d = X.shape[1]
     probe = [_math.exp(t) for t in torch.linspace(
         _math.log(probe_lo), _math.log(probe_hi), probe_rungs).tolist()]
-    sr = SpectralReward(d, n_features=n_features, sigma_w=probe, seed=seed)
+    # the probe basis must live where the cache lives (sigma_w=auto on GPU)
+    sr = SpectralReward(d, n_features=n_features, sigma_w=probe, seed=seed,
+                        device=X.device)
     _, info = snr_band_weights(sr.features(X), y, sr.w2.sqrt(),
                                n_bands=probe_rungs,
                                generator=torch.Generator().manual_seed(seed + 9))
