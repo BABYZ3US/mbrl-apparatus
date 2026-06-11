@@ -33,4 +33,4 @@ spectral:
     shifts: [0, 0]
 algo:
   dynamics_ensemble: 5
-  ensemble_pessimism: 0.5          # PLACEHOLDER — set campaign 1's winner
+  ensemble_pessimism: 1.0          # campaign 1 winner (2026-06-11): -244±108 vs control -395±77 (n=3, suggestive not significant)

@@ -11,6 +11,17 @@
 # NOT yet RL-validated — this config is the arm to run, not a claim.
 # Sweep grid: algo.ensemble_pessimism in {0.0, 0.25, 0.5, 1.0} x seeds {0,1,2};
 # algo.dynamics_ensemble in {3, 5}.
+#
+# CAMPAIGN 1 RESULT (2026-06-11, RunPod 3090, HalfCheetah@100k, members=5,
+# 12/12 arms; full receipts results/runs/ens-p*):
+#   final eval/return: p00 -395±77 | p025 -333±91 | p05 -373±23 | p10 -244±108
+#   -> no eval regression anywhere; p=1.0 nominally best (~t=2.0 at n=3 vs
+#      control — suggestive, NOT significant).
+#   The variance criterion is INVALID as written: late imagine/penalty_var
+#   <= 0.2 while imagine/return_var is 1e8-1e10 INCLUDING the p=0 control —
+#   the explosion is the symexp reward tail, not the penalty and not
+#   measurable model-exploitation. Next: replicate direction on the spectral
+#   stack (ensemble_spectral, p in {0, 1.0}) where symexp is absent.
 experiment:
   name: ensemble
 model:
