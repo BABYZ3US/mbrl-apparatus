@@ -108,3 +108,28 @@ def test_resume_bitwise_identical_with_gate(tmp_path):
 
     for k in ("loss/dyn", "loss/total", "penalty/lambda", "penalty/dg_gate"):
         assert m_resumed[k] == pytest.approx(m_ref[k], rel=1e-6), k
+
+
+def test_gate_reaches_the_spectral_penalty():
+    """The restructure's reason: in spectral mode the Hutchinson penalty is 0
+    and the real penalty lives in the closed-form theta weights — the gate must
+    scale THOSE (read self.dg_gate_now), or champion/spectral are ungated."""
+    seed_everything(0)
+    cfg = _cfg(gate=True, heads=3)
+    # turn on the spectral stack with the encoder aux (trained head signal)
+    cfg.spectral = OmegaConf.create({
+        "enabled": True, "n_features": 64, "refit_every": 5, "encoder_aux": True,
+        "sigma_w": [0.5, 1.0, 2.0], "poly": {"degrees": [1], "coefs": [1.0], "shifts": [0]}})
+    cfg.penalty.schedule.kind = "cuberoot"   # spectral rule: smooth+floor
+    cfg.penalty.schedule.floor = 1e-5
+    cfg.model.latent_cap_mult = 1
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    assert t.dg_enabled and t.spec_enabled
+    # drive the EMA far below peak (heads "converged"); the gate releases from
+    # its full value of 1.0 (one EMA step pulls it partway back -> assert < 0.5,
+    # unambiguously released, not pinned at the floor)
+    t.model_update(_batch())
+    t.dis_ema = 0.001 * t.dis_peak
+    m = t.model_update(_batch(seed=1))
+    assert t.dg_gate_now < 0.5                       # gate reached + released
+    assert "penalty/dg_gate" in m and m["penalty/dg_gate"] < 0.5  # surfaced in spectral-mode metrics

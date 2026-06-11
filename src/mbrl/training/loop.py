@@ -155,6 +155,7 @@ class Trainer:
         self.dg_floor = float(dg.get("floor", 0.1)) if dg else 0.1
         self.dg_decay = float(dg.get("decay", 0.99)) if dg else 0.99
         self.dis_ema, self.dis_peak = None, 0.0  # checkpointed
+        self.dg_gate_now = 1.0   # current gate factor (1.0 = disabled / full lam)
         if self.dg_enabled:
             _nh = int(cfg.model.get("reward_heads", 1))
             _sp = cfg.get("spectral", None)
@@ -286,7 +287,11 @@ class Trainer:
         sum_d coefs[d] * lam(t + shifts[d]) * |w_j|^(2*degrees[d]).
         Per-degree time SHIFTS phase-shift the lambda schedule so different
         frequency bands clamp/release at different points of training."""
-        theta = [c * self.lam(t + s) for c, s in zip(self.spec_coefs, self.spec_shifts)]
+        # self.dg_gate_now (disagreement gate) scales the schedule uniformly so
+        # the spectral penalty releases with the reward ensemble's convergence
+        # too; it is 1.0 when the gate is disabled (no behaviour change).
+        theta = [c * self.dg_gate_now * self.lam(t + s)
+                 for c, s in zip(self.spec_coefs, self.spec_shifts)]
         return poly_weights(head.w2.sqrt(), self.spec_degrees, theta)
 
     def _spectral_refit(self):
@@ -446,6 +451,30 @@ class Trainer:
             batch_max = r_target.abs().max().item()
             if np.isfinite(batch_max):  # NaN hygiene: never poison the bound
                 self.symlog_bound = max(self.symlog_bound, batch_max)
+        # disagreement-gated lambda (penalty.disagreement_gate): compute the
+        # gate HERE — before the spectral refit below reads self.dg_gate_now via
+        # the closed-form theta weights, so champion/spectral are gated too (not
+        # just the MLP Hutchinson path). Signal = the reward ensemble's head-std
+        # on this batch (the MLP/aux heads, trained in every stack: native in
+        # mlp, encoder-grounding aux in spectral/champion). Detached, no RNG;
+        # dis_ema/peak checkpointed -> bitwise resume. Updated every step (warm
+        # through auto-dose warmup). self.dg_gate_now stays 1.0 when disabled.
+        dg_metrics = {}
+        if self.dg_enabled:
+            with torch.no_grad():
+                d_dis = self.reward.all_heads(z.detach(), a, tau).std(0).mean().item()
+            import math as _mdg
+            if _mdg.isfinite(d_dis):
+                self.dis_ema = (d_dis if self.dis_ema is None
+                                else self.dg_decay * self.dis_ema
+                                + (1 - self.dg_decay) * d_dis)
+                self.dis_peak = max(self.dis_peak, self.dis_ema)
+            if self.dis_ema is not None and self.dis_peak > 0:
+                d_norm = min(max(self.dis_ema / self.dis_peak, 0.0), 1.0)
+                self.dg_gate_now = self.dg_floor + (1.0 - self.dg_floor) * d_norm
+            dg_metrics = {"penalty/disagreement": d_dis,
+                          "penalty/dg_gate": self.dg_gate_now}
+
         spec_metrics = {}
         if self.spec_enabled:
             # Spectral reward path: no MLP reward fit loss — the closed-form
@@ -578,26 +607,10 @@ class Trainer:
                 self.lam.lam0 = self.lam0_auto
         else:
             lam_t = self.lam(self.step)
-        # disagreement-gated lambda: update the reward-head-std EMA every step
-        # (warm during auto-dose warmup too) and release lam toward the floor as
-        # the ensemble converges. Detached readout (no_grad, no RNG) — does not
-        # perturb the bitwise-exact fit graph; dis_ema/peak are checkpointed.
-        if self.dg_enabled:
-            with torch.no_grad():
-                d_dis = self.reward.all_heads(z.detach(), a, tau).std(0).mean().item()
-            import math as _mdg
-            if _mdg.isfinite(d_dis):
-                self.dis_ema = (d_dis if self.dis_ema is None
-                                else self.dg_decay * self.dis_ema
-                                + (1 - self.dg_decay) * d_dis)
-                self.dis_peak = max(self.dis_peak, self.dis_ema)
-            dg_gate = 1.0
-            if self.dis_ema is not None and self.dis_peak > 0:
-                d_norm = min(max(self.dis_ema / self.dis_peak, 0.0), 1.0)
-                dg_gate = self.dg_floor + (1.0 - self.dg_floor) * d_norm
-            lam_t = lam_t * dg_gate
-            spec_metrics["penalty/disagreement"] = d_dis
-            spec_metrics["penalty/dg_gate"] = dg_gate
+        # disagreement-gated lambda (MLP path): the gate was computed early
+        # (self.dg_gate_now, before the spectral refit so closed-form theta sees
+        # it too); here it scales the Hutchinson penalty's lambda.
+        lam_t = lam_t * self.dg_gate_now
         if rew_loss is None:  # spectral: the MLP reward fit is skipped entirely
             loss = dyn_loss + lam_t * pen
             # ENCODER-GROUNDING AUX (2026-06-08, HalfCheetah collapse): in
@@ -638,7 +651,7 @@ class Trainer:
         out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss_val,
                "penalty/value": pen_val, "penalty/lambda": lam_t,
                "loss/total": loss.item(), "step": self.step, **spec_metrics,
-               **dyn_calib}
+               **dyn_calib, **dg_metrics}
         if self.lam0_auto is not None:
             out["penalty/lam0_auto"] = self.lam0_auto
         return out
