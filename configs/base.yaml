@@ -40,6 +40,18 @@ penalty:
                         # report sec.3: clamped +41 beat Frobenius -40; unclamped -79).
                         # 'clamped decaying trace' = this + a decaying schedule.
   penalize_dynamics: false   # R+T optional (R8/R9); NEVER add policy (R10)
+  disagreement_gate:    # MODEL-paced lambda: scale lam(t) by the reward-head
+                        # ensemble's epistemic state. Full strength while the
+                        # heads disagree (model uncertain, early), released
+                        # toward `floor` as they converge (R12 anneal driven by
+                        # the model, not the clock; signal = reward-head std,
+                        # the very object the penalty regularizes). The gate is
+                        # in [floor, 1] (never boosts above the schedule; R14:
+                        # lam*>0 so floor>0). Needs reward_heads>=2 + a trained
+                        # reward model (non-spectral, or spectral+encoder_aux).
+    enabled: false      # DEFAULT OFF = exact current behaviour (clean ablation)
+    floor: 0.1          # gate floor: lam never released below floor*schedule
+    decay: 0.99         # disagreement EMA decay (same family as adaptive horizon)
   auto_dose:            # auto-set lam0 from the measured fit/penalty scale ratio
     enabled: true       # DEFAULT ON: dose measured per env (presets that need
                         # fixed doses disable it explicitly)

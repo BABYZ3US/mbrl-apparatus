@@ -1,0 +1,27 @@
+# @package _global_
+# DISAGREEMENT-GATED LAMBDA (2026-06-11): the MODEL-paced anneal.
+#
+# Founding-doc grounding: R12 anneals lambda strong->floor over TIME; R11/R14
+# say the principled control is the reward model's bias-variance / SNR state,
+# NOT policy return (PM's reward-tied-lambda instinct, redirected to the signal
+# the theory licenses — see docs/algorithm_review notes). The gate scales
+# lam(t) by the reward ensemble's epistemic state: full while the 3 heads
+# disagree (uncertain, early), released toward floor as they converge — an
+# anneal paced by the model's own certainty instead of a hardcoded t0.
+#
+# Clean ablation, default reward stack (MLP heads = the regularized object IS
+# the disagreement signal). The gate MULTIPLIES the schedule, so this isolates
+# its marginal effect on top of the champion time-anneal.
+#   arms: penalty.disagreement_gate.enabled in {false (control), true} x seeds {0,1,2}
+#   success: gate >= control on eval/return AND the lam release tracks the
+#            reward-head convergence (penalty/dg_gate falls as penalty/disagreement
+#            falls) — a model-paced anneal that earns its keep over the clock.
+# Follow-up if it wins: schedule=constant + gate (the gate as the WHOLE anneal),
+# and the spectral-stack variant (needs encoder_aux for a trained head signal).
+experiment:
+  name: dgate
+penalty:
+  disagreement_gate:
+    enabled: true
+    floor: 0.1
+    decay: 0.99

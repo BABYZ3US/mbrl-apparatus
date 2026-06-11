@@ -144,6 +144,29 @@ class Trainer:
         self.ah_decay = float(ah.get("decay", 0.99)) if ah else 0.99
         self.pen_ema, self.pen_peak = None, 0.0  # checkpointed
 
+        # Disagreement-gated lambda (penalty.disagreement_gate): lam(t) scaled
+        # by the reward ensemble's convergence — full while heads disagree
+        # (uncertain, early), released toward `floor` as they agree (R12 anneal,
+        # model-paced not clock-paced). Gate in [floor, 1]; reuses the EMA/peak
+        # pattern; dis_ema/peak are checkpointed (no new RNG -> bitwise resume).
+        # cfg-only reads here so it is order-independent of the spectral block.
+        dg = cfg.penalty.get("disagreement_gate", None)
+        self.dg_enabled = bool(dg and dg.get("enabled", False))
+        self.dg_floor = float(dg.get("floor", 0.1)) if dg else 0.1
+        self.dg_decay = float(dg.get("decay", 0.99)) if dg else 0.99
+        self.dis_ema, self.dis_peak = None, 0.0  # checkpointed
+        if self.dg_enabled:
+            _nh = int(cfg.model.get("reward_heads", 1))
+            _sp = cfg.get("spectral", None)
+            _aux_on = bool(_sp.get("encoder_aux", True)) if _sp else True
+            _spec_on = bool(_sp and _sp.get("enabled", False))
+            if _nh < 2 or (_spec_on and not _aux_on):
+                import warnings as _wdg
+                _wdg.warn("[penalty] disagreement_gate needs reward_heads>=2 and "
+                          "a trained reward model (non-spectral or spectral+"
+                          "encoder_aux); disabling — lambda follows the schedule.")
+                self.dg_enabled = False
+
         # Spectral reward path (spectral.enabled): the reward is an ensemble of
         # closed-form RFF ridge heads over the SAME coords as the penalty
         # (z.detach(), a[, tau]); refit every refit_every model updates from a
@@ -555,6 +578,26 @@ class Trainer:
                 self.lam.lam0 = self.lam0_auto
         else:
             lam_t = self.lam(self.step)
+        # disagreement-gated lambda: update the reward-head-std EMA every step
+        # (warm during auto-dose warmup too) and release lam toward the floor as
+        # the ensemble converges. Detached readout (no_grad, no RNG) — does not
+        # perturb the bitwise-exact fit graph; dis_ema/peak are checkpointed.
+        if self.dg_enabled:
+            with torch.no_grad():
+                d_dis = self.reward.all_heads(z.detach(), a, tau).std(0).mean().item()
+            import math as _mdg
+            if _mdg.isfinite(d_dis):
+                self.dis_ema = (d_dis if self.dis_ema is None
+                                else self.dg_decay * self.dis_ema
+                                + (1 - self.dg_decay) * d_dis)
+                self.dis_peak = max(self.dis_peak, self.dis_ema)
+            dg_gate = 1.0
+            if self.dis_ema is not None and self.dis_peak > 0:
+                d_norm = min(max(self.dis_ema / self.dis_peak, 0.0), 1.0)
+                dg_gate = self.dg_floor + (1.0 - self.dg_floor) * d_norm
+            lam_t = lam_t * dg_gate
+            spec_metrics["penalty/disagreement"] = d_dis
+            spec_metrics["penalty/dg_gate"] = dg_gate
         if rew_loss is None:  # spectral: the MLP reward fit is skipped entirely
             loss = dyn_loss + lam_t * pen
             # ENCODER-GROUNDING AUX (2026-06-08, HalfCheetah collapse): in
@@ -765,6 +808,8 @@ class Trainer:
                 "ad_pen_sum": self.ad_pen_sum,
                 # adaptive-horizon certificate state
                 "pen_ema": self.pen_ema, "pen_peak": self.pen_peak,
+                # disagreement-gate EMA state (bitwise resume)
+                "dis_ema": self.dis_ema, "dis_peak": self.dis_peak,
                 "hutchinson_gen": self.gen.get_state()}
         if self.spec_enabled:
             # spectral reward: per-head (W, b, c) + the rolling cache + refit
@@ -799,6 +844,8 @@ class Trainer:
         if "lam0_sched" in sd:  # auto-dose may have rewritten the schedule's lam0
             self.lam.lam0 = sd["lam0_sched"]
         self.lam0_auto = sd.get("lam0_auto", None)
+        self.dis_ema = sd.get("dis_ema", None)
+        self.dis_peak = sd.get("dis_peak", 0.0)
         self.ad_count = sd.get("ad_count", 0)
         self.ad_fit_sum = sd.get("ad_fit_sum", 0.0)
         self.ad_pen_sum = sd.get("ad_pen_sum", 0.0)
