@@ -608,17 +608,23 @@ class Trainer:
             lam_t = 0.0
             self.ad_count += 1
             if self.ad_count > self.ad_tail_start:  # tail window only
-                # spectral: the MLP reward fit doesn't exist — dose on dyn only
-                self.ad_fit_sum += dyn_loss.item() + (
-                    0.0 if self.spec_enabled else rew_loss.item())
+                # Dose against the REWARD fit — the quantity the penalty
+                # regularizes — which is a non-negative MSE in BOTH paths
+                # (spectral: the closed-form heads' ensemble-mean fit MSE;
+                # MLP: rew_loss). NOT the dynamics loss: on the gaussian-dynamics
+                # path (champion) it is a Gaussian NLL that goes NEGATIVE as the
+                # model sharpens (the `lv` term), which drove lam0_auto negative
+                # -> floored -> the penalty was silently OFF (champion -247..-310
+                # vs fixed-dose -160s, 2026-06-11).
+                self.ad_fit_sum += rew_loss_val
                 self.ad_pen_sum += pen_val
             if self.ad_count == self.ad_warmup:
                 n_tail = self.ad_warmup - self.ad_tail_start
                 mean_fit = self.ad_fit_sum / n_tail
                 mean_pen = self.ad_pen_sum / n_tail
                 self.lam0_auto = min(
-                    self.ad_target_ratio * mean_fit / max(mean_pen, 1e-12),
-                    self.ad_lam_max)
+                    self.ad_target_ratio * max(mean_fit, 0.0) / max(mean_pen, 1e-12),
+                    self.ad_lam_max)   # max(,0): belt against any negative fit ref
                 self.lam.lam0 = self.lam0_auto
         else:
             lam_t = self.lam(self.step)

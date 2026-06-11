@@ -133,3 +133,25 @@ def test_gate_reaches_the_spectral_penalty():
     m = t.model_update(_batch(seed=1))
     assert t.dg_gate_now < 0.5                       # gate reached + released
     assert "penalty/dg_gate" in m and m["penalty/dg_gate"] < 0.5  # surfaced in spectral-mode metrics
+
+
+def test_autodose_positive_on_gaussian_dynamics():
+    """Regression: champion = spectral reward + GAUSSIAN dynamics, whose loss is
+    a Gaussian NLL that goes NEGATIVE as the model sharpens. auto_dose must dose
+    against the (non-negative) REWARD fit, not the dynamics NLL — else lam0_auto
+    goes negative and floors the penalty to ~zero (champion ran with no penalty,
+    2026-06-11)."""
+    seed_everything(0)
+    cfg = _cfg(gate=False, heads=3)
+    cfg.model.dynamics = "gaussian"          # the champion ingredient
+    cfg.penalty.auto_dose = OmegaConf.create({"enabled": True, "warmup_updates": 24,
+                                              "target_ratio": 0.1, "lam0_max": 10.0})
+    cfg.spectral = OmegaConf.create({"enabled": True, "n_features": 64, "refit_every": 4,
+        "encoder_aux": True, "sigma_w": [0.5, 1.0, 2.0],
+        "poly": {"degrees": [1], "coefs": [1.0], "shifts": [0]}})
+    cfg.penalty.schedule.kind = "cuberoot"; cfg.penalty.schedule.floor = 1e-5
+    cfg.model.latent_cap_mult = 1
+    t = Trainer(cfg, obs_dim=5, action_dim=2)
+    for i in range(25):
+        t.model_update(_batch(n=64, obs_dim=5, act_dim=2, seed=i))
+    assert t.lam0_auto is not None and t.lam0_auto >= 0.0, t.lam0_auto  # NEVER negative
