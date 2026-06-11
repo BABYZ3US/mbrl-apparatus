@@ -20,6 +20,7 @@ from ..models import (Encoder, EMAEncoder, VAEEncoder, CustomEncoder, AffineDyna
                       GaussianAffineDynamics, FullMLPDynamics, RewardModel,
                       Policy, ValueFn)
 from ..models.ensemble import EnsembleAffineDynamics
+from ..models.planner import SequencePlanner
 from ..models.reward import symlog, symexp
 from ..models.spectral import SpectralReward, poly_weights, snr_band_weights
 from ..regularization.hutchinson import hvp_penalty, laplacian_trace_penalty
@@ -102,10 +103,26 @@ class Trainer:
         self.value = ValueFn(k, h, d, task_dim=task_dim).to(device)
         self.value_target = copy.deepcopy(self.value).requires_grad_(False)
 
+        # Transformer action-sequence planner (planner.enabled): REPLACES the
+        # per-step MLP policy as the actor. It emits an H-step plan from z0; the
+        # affine T still predicts the latents (R15); the same imagination +
+        # λ-return objective trains it (R10: never curvature-penalized). The
+        # horizon is FIXED to imagination.horizon (the plan length) — adaptive
+        # horizon is incompatible and overridden when the planner is on.
+        pl = cfg.get("planner", None)
+        self.use_planner = bool(pl and pl.get("enabled", False))
+        self.planner = None
+        if self.use_planner:
+            self.planner = SequencePlanner(
+                k, action_dim, horizon=int(cfg.imagination.horizon),
+                d_model=int(pl.get("d_model", 128)), nhead=int(pl.get("nhead", 4)),
+                layers=int(pl.get("layers", 2)), task_dim=task_dim).to(device)
+
         self.model_opt = torch.optim.AdamW(
             [*self.encoder.parameters(), *self.dynamics.parameters(), *self.reward.parameters()],
             lr=cfg.optim.model_lr)
-        self.policy_opt = torch.optim.AdamW(self.policy.parameters(), lr=cfg.optim.policy_lr)
+        actor_params = (self.planner if self.use_planner else self.policy).parameters()
+        self.policy_opt = torch.optim.AdamW(actor_params, lr=cfg.optim.policy_lr)
         self.value_opt = torch.optim.AdamW(self.value.parameters(), lr=cfg.optim.value_lr)
 
         self.lam = LambdaSchedule(**cfg.penalty.schedule)
@@ -734,6 +751,8 @@ class Trainer:
     def _imagination_horizon(self) -> int:
         """Curvature-certified horizon: imagine further only as the penalty EMA
         falls off its running peak (low curvature => trust longer rollouts)."""
+        if self.use_planner:
+            return self.planner.H        # the plan length is fixed (no adaptive H)
         if not self.ah_enabled:
             return int(self.cfg.imagination.horizon)
         if self.pen_ema is None or self.pen_peak <= 0:
@@ -751,10 +770,17 @@ class Trainer:
         ent_coef = cfg_i.get("entropy_coef", 3e-4)
 
         # --- differentiable imagination (gradients flow through T and R) ---
+        # planner: emit the whole H-step plan from z0 up front (open-loop), then
+        # roll T under it; the per-step policy samples closed-loop on z_k.
+        plan_a, plan_logp = (self.planner.plan(z0, tau0) if self.use_planner
+                             else (None, None))
         zs, rs, logps, dis, pens = [z0], [], [], [], []
         z = z0
-        for _ in range(H):
-            a, logp = self.policy.sample(z, tau0)
+        for k in range(H):
+            if self.use_planner:
+                a, logp = plan_a[k], plan_logp[k]
+            else:
+                a, logp = self.policy.sample(z, tau0)
             z = self.dynamics(z, a)
             zs.append(z)
             r_im, d = self._imagined_reward(zs[-2], a, tau0)
@@ -811,7 +837,8 @@ class Trainer:
         pi_loss = -(pi_signal / norm).mean() - ent_coef * entropy
         self.policy_opt.zero_grad(set_to_none=True)
         pi_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 100.0)
+        actor = self.planner if self.use_planner else self.policy
+        torch.nn.utils.clip_grad_norm_(actor.parameters(), 100.0)
         self.policy_opt.step()
 
         # --- value: regress to lambda-returns on detached latents ---
@@ -839,11 +866,20 @@ class Trainer:
                 **pen_stats}
 
     @torch.no_grad()
+    def act(self, z: torch.Tensor, tau: torch.Tensor | None = None) -> torch.Tensor:
+        """Execution action selection (B, act): the planner's receding-horizon
+        first planned action, or a policy sample. The one seam env-facing code
+        (collection, eval) uses, so the actor swap is invisible to train.py."""
+        if self.use_planner:
+            return self.planner.act(z, tau)
+        return self.policy.sample(z, tau)[0]
+
+    @torch.no_grad()
     def imagine(self, z0: torch.Tensor, horizon: int, tau0: torch.Tensor | None = None):
         zs, as_, rs = [z0], [], []
         z = z0
         for _ in range(horizon):
-            a, _ = self.policy.sample(z, tau0)
+            a = self.act(z, tau0)
             z = self.dynamics(z, a)
             zs.append(z); as_.append(a)
             rs.append(self._imagined_reward(zs[-2], a, tau0)[0])
@@ -859,6 +895,7 @@ class Trainer:
                 "policy_opt": self.policy_opt.state_dict(),
                 "value_opt": self.value_opt.state_dict(), "step": self.step,
                 "ret_scale": self.ret_scale,
+                **({"planner": self.planner.state_dict()} if self.use_planner else {}),
                 # data-driven symexp clamp bound (bitwise resume)
                 "symlog_bound": self.symlog_bound,
                 # auto-dose: computed lam0 + warmup accumulators (bitwise resume)
@@ -893,6 +930,8 @@ class Trainer:
         self.encoder.load_state_dict(sd["encoder"]); self.ema.load_state_dict(sd["ema"])
         self.dynamics.load_state_dict(sd["dynamics"]); self.reward.load_state_dict(sd["reward"])
         self.policy.load_state_dict(sd["policy"]); self.value.load_state_dict(sd["value"])
+        if self.use_planner and "planner" in sd:
+            self.planner.load_state_dict(sd["planner"])
         if "value_target" in sd:
             self.value_target.load_state_dict(sd["value_target"])
         self.model_opt.load_state_dict(sd["model_opt"])
@@ -958,7 +997,7 @@ def collect_vectorized(trainer, env, buffer, obs, autoreset, n_steps: int,
         with torch.no_grad():
             z = trainer.encoder(torch.as_tensor(np.asarray(obs), dtype=torch.float32,
                                                 device=device))
-            a, _ = trainer.policy.sample(z)
+            a = trainer.act(z)
         a_np = a.cpu().numpy()
         obs_next, r, term, trunc, _ = env.step(a_np)
         for i in range(num_envs):

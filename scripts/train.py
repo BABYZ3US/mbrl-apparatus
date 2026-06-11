@@ -55,7 +55,7 @@ def evaluate(trainer, cfg, device, episodes: int = 3) -> float:
             with torch.no_grad():
                 z = trainer.encoder(torch.as_tensor(obs, dtype=torch.float32,
                                                     device=device).unsqueeze(0))
-                a, _ = trainer.policy.sample(z)
+                a = trainer.act(z)
             obs, r, term, trunc, _ = env.step(a.squeeze(0).cpu().numpy())
             total += r
             done = term or trunc
@@ -75,7 +75,7 @@ def record_episode_frames(trainer, cfg, device) -> list:
         with torch.no_grad():
             z = trainer.encoder(torch.as_tensor(obs, dtype=torch.float32,
                                                 device=device).unsqueeze(0))
-            a, _ = trainer.policy.sample(z)
+            a = trainer.act(z)
         obs, _, term, trunc, _ = env.step(a.squeeze(0).cpu().numpy())
         done = term or trunc
     env.close()

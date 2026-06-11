@@ -156,6 +156,17 @@ imagination:
     h_max: 25
     decay: 0.99         # EMA decay for penalty/value tracking
 
+planner:                # transformer action-sequence planner (Dreamer latent-planner)
+  enabled: false        # DEFAULT OFF = the per-step MLP policy actor (unchanged)
+                        # ON: a causal transformer emits an H-step plan from z0;
+                        # affine T predicts latents (R15); same imagination +
+                        # λ-return objective (R10: never curvature-penalized);
+                        # receding-horizon execution (first action). Horizon is
+                        # FIXED to imagination.horizon (adaptive_horizon overridden).
+  d_model: 128
+  nhead: 4
+  layers: 2
+
 optim:
   model_lr: 3.0e-4
   policy_lr: 1.0e-4
