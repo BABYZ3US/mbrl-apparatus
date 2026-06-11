@@ -1,0 +1,36 @@
+# @package _global_
+# CAMPAIGN 2 (authored 2026-06-11, pre-staged): the ensemble-pessimism arm on
+# the SPECTRAL reward stack — the champion-comparable bridge.
+#
+# Why this composition: the full champion uses GAUSSIAN dynamics, which is
+# structurally incompatible with the ensemble (members must be affine, R15).
+# spectral_ladder is the champion's reward machinery (RFF sigma ladder x
+# high-clamp polynomial, exact-H^2 penalty — bridge run 3's +33.7% interaction)
+# on AFFINE dynamics — which composes with the ensemble exactly. So this arm
+# answers: does the epistemic discount still help when the reward model is the
+# closed-form spectral stack instead of the MLP heads?
+#
+# ensemble_pessimism is a PLACEHOLDER (0.5): set it to campaign 1's winning P
+# before launching, and run the p=0 control alongside (same base, discount off).
+# Sweep grid: algo.ensemble_pessimism in {0.0, <winner>} x seeds {0,1,2} on
+# HalfCheetah-v5; success = the campaign-1 effect direction replicates on the
+# spectral stack (imagine/return_var down, eval/return holds vs p=0).
+experiment:
+  name: ensemble_spectral
+model:
+  dynamics: affine        # ensemble members are deterministic-affine (enforced)
+  latent_cap_mult: 1      # spectral rule: k = obs_dim (closed-form fit over-resolves wide latents)
+penalty:
+  schedule:
+    kind: cuberoot        # spectral rule: smooth floored decay only (zero-touching
+    floor: 1.0e-5         # schedules make the next refit an unregularized interpolator)
+spectral:
+  enabled: true
+  sigma_w: [0.25, 0.5, 1.0, 2.0]   # the fixed ladder (spectral_ladder recipe)
+  poly:
+    degrees: [1, 3]                # high-clamp shape (run-3 winner)
+    coefs: [0.1, 10.0]
+    shifts: [0, 0]
+algo:
+  dynamics_ensemble: 5
+  ensemble_pessimism: 0.5          # PLACEHOLDER — set campaign 1's winner

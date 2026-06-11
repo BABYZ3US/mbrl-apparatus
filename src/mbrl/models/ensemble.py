@@ -52,6 +52,9 @@ class EnsembleAffineDynamics(nn.Module):
             AffineMember(latent_dim, action_dim, hidden, depth, task_dim)
             for _ in range(n_members)
         ])
+        # dim attributes mirroring the single-dynamics classes (k, m) so the
+        # ensemble stays a drop-in for duck-typed consumers
+        self.k, self.m = latent_dim, action_dim
 
     def all_members(self, z: Tensor, a: Tensor, tau: Tensor | None = None) -> Tensor:
         """(M, ..., latent_dim) — every member's prediction."""

@@ -250,6 +250,9 @@ class Trainer:
             and self.spec_cache_x.ndim == 2 else None
         # at __init__ time the cache doesn't exist yet; derive from encoder
         if spec_in is None:
+            # dynamics.m = action_dim, uniform across ALL dynamics classes —
+            # EnsembleAffineDynamics gained k/m for exactly this consumer
+            # (caught by test_experiment_configs composing spectral + ensemble)
             spec_in = self.encoder.latent_dim + self.dynamics.m + self.task_dim
         return [SpectralReward(spec_in, n_features=self.spec_nf, sigma_w=sigma_w,
                                seed=int(self.cfg.seed) * 1000 + i,
