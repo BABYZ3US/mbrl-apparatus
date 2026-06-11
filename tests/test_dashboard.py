@@ -23,7 +23,14 @@ def test_dashboard_builds():
     assert page.exists(), "dashboard.html was not written"
     assert Path(out) == page
     html = page.read_text()
-    assert len(html.encode()) > 50_000, "dashboard suspiciously small"
+    # STRUCTURE, not byte count (CI run 4 fix): the 50KB floor encoded a dev
+    # machine's accumulated run mirrors — a fresh runner with ZERO training
+    # state legitimately renders ~18KB. Every section must exist regardless;
+    # the data-volume floor applies only when run mirrors are actually present.
     assert "plotly" in html.lower()
     for sid in SECTION_IDS:
         assert sid in html, f"missing section id {sid}"
+    if any((ROOT / "results" / "runs").glob("*/metrics.jsonl")):
+        assert len(html.encode()) > 50_000, "runs present but dashboard suspiciously small"
+    else:
+        assert len(html.encode()) > 5_000, "even the empty-state page should render all sections"
