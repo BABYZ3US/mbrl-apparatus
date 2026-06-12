@@ -74,12 +74,16 @@ class CheckpointManager:
         if not permanent and tag not in ("best",):
             self._gc()
         if self.wandb_run is not None:
-            import wandb
-            art = wandb.Artifact(f"model-{self.wandb_run.id}", type="checkpoint",
-                                 metadata={"tag": tag, "env_steps": env_steps,
-                                           "cfg_hash": self.hash})
-            art.add_file(str(path))
-            self.wandb_run.log_artifact(art)
+            try:   # best-effort: a W&B/network failure must NEVER kill training
+                import wandb
+                art = wandb.Artifact(f"model-{self.wandb_run.id}", type="checkpoint",
+                                     metadata={"tag": tag, "env_steps": env_steps,
+                                               "cfg_hash": self.hash})
+                art.add_file(str(path))
+                self.wandb_run.log_artifact(art)
+            except Exception as e:  # noqa: BLE001 — the local checkpoint is already saved
+                print(f"[checkpoint] W&B artifact push failed ({e!r}); "
+                      "local checkpoint kept, training continues", flush=True)
         if self.results_root and self.run_name:
             try:
                 from mbrl.studio.artifacts import record_artifact
