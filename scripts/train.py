@@ -41,13 +41,16 @@ def make_env(cfg, num_envs: int):
     return gym.vector.AsyncVectorEnv([lambda i=i: one(i) for i in range(num_envs)])
 
 
-def evaluate(trainer, cfg, device, episodes: int = 3) -> float:
+def evaluate(trainer, cfg, device, episodes: int = 3) -> tuple[float, float]:
+    """Returns (mean episode return, mean forward velocity). x_velocity (when the
+    env reports it, e.g. MuJoCo locomotion) is the do-nothing/conservatism check:
+    a passive policy scores ~0 return AND ~0 velocity; a real runner has v>0."""
     import gymnasium as gym
     env = gym.make(cfg.env.name)
     if _obs_noise(cfg) > 0.0:   # eval through the SAME noisy channel
         from mbrl.envs.obs_noise import GaussianObsNoise
         env = GaussianObsNoise(env, _obs_noise(cfg), seed=int(cfg.seed) * 1000 + 7)
-    total = 0.0
+    total, vel_sum, steps = 0.0, 0.0, 0
     for ep in range(episodes):
         obs, _ = env.reset(seed=cfg.seed * 1000 + ep)
         done = False
@@ -56,11 +59,13 @@ def evaluate(trainer, cfg, device, episodes: int = 3) -> float:
                 z = trainer.encoder(torch.as_tensor(obs, dtype=torch.float32,
                                                     device=device).unsqueeze(0))
                 a = trainer.act(z)
-            obs, r, term, trunc, _ = env.step(a.squeeze(0).cpu().numpy())
+            obs, r, term, trunc, info = env.step(a.squeeze(0).cpu().numpy())
             total += r
+            vel_sum += float(info.get("x_velocity", info.get("reward_run", 0.0)))
+            steps += 1
             done = term or trunc
     env.close()
-    return total / episodes
+    return total / episodes, vel_sum / max(steps, 1)
 
 
 def record_episode_frames(trainer, cfg, device) -> list:
@@ -157,7 +162,7 @@ def main(cfg: DictConfig):
         metrics["env_steps"] = env_steps
         iteration = env_steps // cfg.training.steps_per_iter
         if iteration % cfg.training.eval_every_iters == 0:
-            metrics["eval/return"] = evaluate(trainer, cfg, device)
+            metrics["eval/return"], metrics["eval/x_velocity"] = evaluate(trainer, cfg, device)
             eval_count += 1
             if video_enabled and eval_count % video_every == 0:
                 # never let a headless/render failure kill training
