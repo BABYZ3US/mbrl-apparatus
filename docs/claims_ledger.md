@@ -331,6 +331,40 @@ user-proposed).**
   the predicted payoff; without it the transformer is pure overhead at 200K
   steps). One change at a time: run 11 builds on run 10's winning encoder.
 
+**gpu_spectral 6-arm RL validation — RESULTS (2026-06-12, adjudicated from
+results/runs JSONL): NOT SUPPORTED, and the batch is apparatus-confounded by
+the anchor.** Arms champion / spec-auto / spec-ladder / spec-single /
+spec-learned / mlp-recipe, HalfCheetah-v5, 200K env steps, 3 seeds each; all
+post-encoder_aux-fix (spectral/aux_loss logged, latent/z_std 0.50–0.93 — no
+collapse). Pre-registered rule (improvement plan #1, runs 3/5): spec-auto ≥
+spec-ladder > spec-single WITH the mlp-recipe anchor reproducing +98 ± 23.
+Final returns (mean of last-3 evals per seed; mean ± sd over seeds):
+spec-ladder −24.5 ± 410.0, spec-learned −117.6 ± 145.6, spec-single
+−187.5 ± 178.7, mlp-recipe −188.9 ± 90.8, spec-auto −208.5 ± 96.9, champion
+−309.5 ± 56.8. Adjudication: (i) spec-auto ≥ spec-ladder FAILS (−208.5 vs
+−24.5; seedwise winrate 4/9 = parity) — the supervised +48.3% calibration
+edge does not appear at this scale/power; (ii) spec-ladder > spec-single
+holds on point estimate only (winrate 6/9; the ladder's sd 410 is one seed
+at +443, the other two lose to single's mean); (iii) ANCHOR FAILED
+decisively: mlp-recipe −188.9 ± 90.8 vs required +98 ± 23 — it lands in the
+ORIGINAL BASELINE band (−165 ± 41) even though the λ schedule verifiably
+executed (λ = 0.5 → 1e-5 step at the schedule midpoint, per JSONL) and
+DreamSmooth was on (note: smoothing.sigma = 1.5 here vs σ_t = 1 in the
+original — a candidate discrepancy). PER THE RULE, NO SOFTENING: the
+supervised +48.3% does NOT become an RL claim. Because the apparatus
+regression test failed, absolute comparisons to historical numbers are VOID
+for this batch; the arm-vs-arm reads above stand only with the stated power
+caveats. ROOT-CAUSE REQUIRED BEFORE RELAUNCH: why does this trainer's
+recipe arm reproduce the original baseline instead of the original result
+(suspects: smoothing σ 1.5 vs 1.0, eval protocol, Hutchinson probe count,
+imagination/value config drift). Secondary, NOT pre-registered (hypothesis
+tier only): champion — spec-auto + gaussian dynamics — was the WORST arm,
+losing 7–9/9 seedwise to every other arm; since it differs from spec-auto
+chiefly by the gaussian head, this connects to run 9's "mechanism without
+return payoff" and makes the MuJoCo requalification urgent before gaussian
+stays in the champion config. Imagined-return variance ordering (late
+median): mlp-recipe ~3e2 ≪ spec arms ~1e11 ≪ champion ~2.6e15.
+
 **Spectral encoder-collapse rule (2026-06-08, from the first HalfCheetah
 batch):** in spectral mode the encoder's only gradient was the dynamics MSE
 (reward cache and behaviour z0 are detached by design), whose trivial solution

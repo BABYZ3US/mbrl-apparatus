@@ -5,10 +5,16 @@ Ranked by expected value per unit work. Status tags: [ready] = can start now,
 
 ## A. Science (the model itself)
 
-1. **[blocked-on-RL] Adjudicate the 5-arm spectral RL validation.** Everything
+1. **[ADJUDICATED 2026-06-12 — NOT SUPPORTED, anchor failed; see ledger]
+   Adjudicate the 5-arm spectral RL validation.** Everything
    below re-ranks on this readout. Decision rules are pre-registered in the
    ledger (runs 3/5). If spec-auto ≥ spec-ladder > spec-single with the MLP
    anchor band reproduced, the supervised +48.3% becomes an RL claim.
+   RESULT: spec-auto ≥ spec-ladder failed (winrate 4/9); mlp-recipe anchor
+   landed in the original BASELINE band (−189 ± 91 vs required +98 ± 23) —
+   batch apparatus-confounded. NEW top priority: root-cause the anchor
+   regression (smoothing σ 1.5 vs 1.0, eval protocol, probe count) before
+   any relaunch.
 
 2. **[SHIPPED 2026-06-08] Recalibration-on-drift for sigma_w=auto.** sigma* is measured on
    early-policy cache data and frozen; the reward landscape's frequency content
