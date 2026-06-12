@@ -167,3 +167,21 @@ non-flat, which R16 has not yet confirmed.
    This converts leg B from "Wiener analogy" to "capacity allocation" — a publishable identity.
 4. **Curved-latent probe:** estimate the encoder Laplacian spectrum (graph-Laplacian on a z minibatch);
    if non-flat, swap RFF → Laplacian-eigenfeatures (a discrete GFT) and re-measure SNR bands.
+
+---
+
+## 7. First result (2026-06-11): IB frontier under observation noise
+
+Noisy β-sweep (champion+VAE, σ_obs=0.5, 3 seeds @250k). eval/return vs rate (nats):
+`determ — −189±77 | β0 (263) −344±177 | β1e-4 (69) −687±434 | β1e-3 (19) −114±38 |
+β1e-2 (11) −124±18 | β1e-1 (2.1) −80±10`.
+
+SUPPORTS the channel hypothesis (R14 denoising mechanism): a sharp elbow at rate≈20 —
+above it the channel passes the obs noise (bad, unstable), below it the encoder
+compresses+denoises (good, tight). IB-optimal (β=1e-1, most compressed) beats the
+deterministic infinite-rate control by +109 at ~1/8 the variance. CAVEATS: (a) the
+CLEAN sweep was killed before running — the clean-flat/noisy-elbow contrast (the cleanest
+proof) is owed; (b) verify the −80 winner actually MOVES (HalfCheetah rewards conservatism;
+−80 < clean-champion −160 is suspicious — could be a do-nothing low-rate policy); (c) n=3,
+β1e-4 unstable. NEXT: re-run NOISE=0.0 half; log forward-velocity; if it holds, the curved-
+latent (GFT) leg is the follow-up.
