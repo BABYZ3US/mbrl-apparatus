@@ -150,6 +150,10 @@ imagination:
   value_target_decay: 0.98
   pessimism: 0.5        # imagined reward = ensemble mean - pessimism * std
   symexp_margin: 1.5    # symexp clamp = margin * running max |symlog(r)| from real batches
+  align_weight: 0.0     # imagination-latent alignment (2507.16450): pull imagined
+                        # latents onto the encoder manifold (match z0 mean/std) to
+                        # combat drift/collapse — esp. for the long-horizon planner.
+                        # DEFAULT 0 = off. Logged: imagine/align.
   adaptive_horizon:     # curvature-certified horizon: longer as penalty EMA falls
     enabled: true
     h_min: 5
@@ -173,6 +177,8 @@ optim:
   value_lr: 3.0e-4
   batch_size: 256
   amp: true             # bf16 autocast for fit losses; penalty always fp32
+  actor_clip: 100.0     # actor (policy/planner) grad-norm clip — a stability lever
+                        # for the long-horizon planner (lower = tamer updates)
 
 training:
   total_env_steps: 100000

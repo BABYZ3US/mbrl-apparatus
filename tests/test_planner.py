@@ -95,3 +95,25 @@ def test_resume_bitwise_identical_with_planner(tmp_path):
     seed_everything(0)
     a_res = t2.act(t2.encoder(_batch(seed=42)[0]).detach())
     assert torch.allclose(a_ref, a_res, atol=1e-6)               # planner restored exactly
+
+
+def test_alignment_loss_and_grad_clip():
+    """Imagination-latent alignment (2507.16450): off by default (imagine/align=0);
+    on -> a finite alignment term + actor/grad_norm logged. The transformer-
+    stabilization lever; pulls imagined latents toward the encoder manifold."""
+    seed_everything(0)
+    cfg = _cfg(planner=True, horizon=6)
+    cfg.imagination.align_weight = 0.0
+    cfg.optim.actor_clip = 100.0
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    m = t.behaviour_update(t.encoder(_batch()[0]).detach())
+    assert m["imagine/align"] == 0.0 and "actor/grad_norm" in m   # off = no-op
+
+    seed_everything(0)
+    cfg2 = _cfg(planner=True, horizon=6)
+    cfg2.imagination.align_weight = 1.0
+    t2 = Trainer(cfg2, obs_dim=3, action_dim=2)
+    m2 = t2.behaviour_update(t2.encoder(_batch()[0]).detach())
+    assert m2["imagine/align"] > 0.0 and math.isfinite(m2["imagine/align"])  # on = real term
+
+import math

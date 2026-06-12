@@ -124,6 +124,10 @@ class Trainer:
         actor_params = (self.planner if self.use_planner else self.policy).parameters()
         self.policy_opt = torch.optim.AdamW(actor_params, lr=cfg.optim.policy_lr)
         self.value_opt = torch.optim.AdamW(self.value.parameters(), lr=cfg.optim.value_lr)
+        # imagination-latent alignment stabilizer (2507.16450) + configurable
+        # actor grad-clip — the transformer-stabilization study's levers.
+        self.align_weight = float(cfg.imagination.get("align_weight", 0.0))
+        self.actor_clip = float(cfg.optim.get("actor_clip", 100.0))
 
         self.lam = LambdaSchedule(**cfg.penalty.schedule)
         self.step = 0
@@ -835,10 +839,26 @@ class Trainer:
         entropy = -logps.mean()
         pi_signal = adv if adv is not None else returns
         pi_loss = -(pi_signal / norm).mean() - ent_coef * entropy
+        # Imagination-latent ALIGNMENT (arXiv 2507.16450-inspired stabilizer):
+        # pull the rolled-out imagined latents back onto the ENCODER's manifold
+        # by matching the per-dim mean/std of z0 (the real encoded latents).
+        # Combats imagination drift — the long plan wandering off-distribution
+        # where the reward/value readouts break (the transformer's
+        # collapse-after-peak failure mode). Grad flows to the actor (and T) via
+        # the imagined zs; the target stats are detached.
+        align_val = 0.0
+        if self.align_weight > 0.0:
+            with torch.no_grad():
+                real_mu, real_sd = z0.mean(0), z0.std(0)
+            imag = zs[1:].reshape(-1, zs.shape[-1])
+            align = ((imag.mean(0) - real_mu).pow(2).mean()
+                     + (imag.std(0) - real_sd).pow(2).mean())
+            pi_loss = pi_loss + self.align_weight * align
+            align_val = align.item()
         self.policy_opt.zero_grad(set_to_none=True)
         pi_loss.backward()
         actor = self.planner if self.use_planner else self.policy
-        torch.nn.utils.clip_grad_norm_(actor.parameters(), 100.0)
+        gnorm = torch.nn.utils.clip_grad_norm_(actor.parameters(), self.actor_clip)
         self.policy_opt.step()
 
         # --- value: regress to lambda-returns on detached latents ---
@@ -863,6 +883,7 @@ class Trainer:
                 "imagine/horizon": H,
                 "imagine/return_mean": returns.mean().item(),
                 "imagine/return_var": returns.var().item(),  # R15 diagnostic
+                "imagine/align": align_val, "actor/grad_norm": float(gnorm),
                 **pen_stats}
 
     @torch.no_grad()
