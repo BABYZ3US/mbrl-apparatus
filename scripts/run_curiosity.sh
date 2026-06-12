@@ -47,6 +47,7 @@ for s in $SEEDS; do
 	$PY scripts/train.py +experiment=champion env=halfcheetah seed="$s" \
 		experiment.name="$tag" \
 		model.encoder=vae model.vae.beta=0.1 \
+		model.dynamics=affine \
 		planner.enabled=true planner.d_model=256 planner.layers=4 planner.nhead=8 \
 		model.depth=4 model.hidden=512 spectral.n_features=1024 \
 		+env.obs_noise="$NOISE" \
