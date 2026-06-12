@@ -39,16 +39,17 @@ Both ingredients contribute substantively; the components are not redundant.
 
 ## 3. The Null-Lagrangian Test
 Is ‖∇²R‖²_F equivalent to (ΔR)² in stochastic NN training? (They share the biharmonic Euler–Lagrange equation in flat ℝᵈ.)
-**Setting.** HalfCheetah-v5, 200K steps, 5 seeds.
+**Setting.** HalfCheetah-v5, 200K steps, **3 seeds**. Three penalty-estimator variants (claims ledger C.6 / experimental record §3.2).
 
 | Estimator | Non-negative? | Final Return |
 |-----------|:-------------:|:------------:|
-| Frobenius ‖Hv‖² (Hutchinson 2-probe) | Always | +73 |
-| Laplacian-trace (vᵀHv)² (2-probe) | Always | +9 |
-| No penalty | — | −39 |
-| Laplacian-2 product (v₁ᵀHv₁)(v₂ᵀHv₂) | Can be < 0 | −51 |
+| Frobenius ‖Hv‖² (Hutchinson, 2-probe) | Always | **+98 ± 23** |
+| Laplacian-trace vᵀHv (unbiased, 2-probe) | Always | **+95 ± 27** |
+| Laplacian-trace (biased, 1-probe) | Always | **+86 ± 31** |
 
-The non-negative estimators outperform the sign-indefinite ones; ordering by performance matches ordering by non-negativity.
+Frobenius and the unbiased Laplacian-trace are statistically indistinguishable (+98 vs +95) — the null-Lagrangian equivalence holds in stochastic NN training, as the shared biharmonic Euler–Lagrange equation predicts. The biased 1-probe estimator is slightly weaker (+86), consistent with its bias.
+
+*(Correction, 2026-06-12: an earlier draft of this table conflated the equivalence test with the separate sign-indefinite / clamp experiment below — reporting Frobenius +73 / Lap-trace 2-probe +9 / no-penalty −39 / Lap-2-product −51 at "5 seeds." The canonical equivalence numbers are above (3 seeds), per the claims ledger.)*
 **Thermodynamic consistency follow-up.** Clamping the sign-indefinite estimator to be non-negative (max with zero) transforms it into a competitive performer:
 
 | Estimator | Non-negative? | Mean Return |
@@ -58,6 +59,8 @@ The non-negative estimators outperform the sign-indefinite ones; ordering by per
 | Lap-2 unclamped | Can be < 0 | −79 |
 
 The clamping experiment is the cleanest evidence that **non-negativity itself** — not any other property of the estimator — is what matters.
+
+> **Reconciliation flag (2026-06-12):** this clamp follow-up is a *separate* comparison harness from the equivalence test above, and its Frobenius baseline reads **−40** where the equivalence test reads **+98**. That gap is not explained in the record — the two were likely run under different configs (the clamp study isolates the sign-indefiniteness effect, not the full +98 recipe). This table's numbers have **not** been re-verified against the project files; treat the −40/+41/−79 ordering as qualitative (non-negativity helps) pending a re-run, and trust the equivalence table above for the absolute Frobenius number.
 
 ## 4. Theory Validation on Pendulum
 4.1 Gradient variance decreases monotonically with λ (~2 orders of magnitude). ✓
