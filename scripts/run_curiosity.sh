@@ -22,6 +22,10 @@ NGPU="${NGPU:-$(nvidia-smi -L 2>/dev/null | grep -c GPU)}"
 JOBS="${JOBS:-$NGPU}"
 STEPS="${STEPS:-1000000}"
 SEEDS="${SEEDS:-0 1}"
+# NOISE = obs-channel input σ. The PM's hypothesis: the big-VAE+planner model
+# needs the DENOISING regime (a real channel bottleneck) to do something other
+# than copy x. >0 gives the VAE compression a job. Default 0.5 (the IB sweep level).
+NOISE="${NOISE:-0.5}"
 PY=".venv/bin/python"
 arm_idx=0
 mkdir -p results/gridlogs
@@ -34,16 +38,18 @@ throttle() { while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 5; done; }
 pids=()
 for s in $SEEDS; do
 	throttle
-	tag="curio-bigvae-plan"
+	nz=$(echo "$NOISE" | tr -d '.')
+	tag="curio-bigvae-plan-n${nz}"
 	log="results/gridlogs/${tag}-s${s}.log"
 	gpu=$((arm_idx % NGPU)); arm_idx=$((arm_idx + 1))
-	echo "launching ${tag} seed ${s} (${STEPS} steps) on GPU ${gpu} -> ${log}"
+	echo "launching ${tag} seed ${s} (${STEPS} steps, noise=${NOISE}) on GPU ${gpu} -> ${log}"
 	OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 CUDA_VISIBLE_DEVICES="$gpu" \
 	$PY scripts/train.py +experiment=champion env=halfcheetah seed="$s" \
 		experiment.name="$tag" \
 		model.encoder=vae model.vae.beta=0.1 \
 		planner.enabled=true planner.d_model=256 planner.layers=4 planner.nhead=8 \
 		model.depth=4 model.hidden=512 spectral.n_features=1024 \
+		+env.obs_noise="$NOISE" \
 		training.total_env_steps="$STEPS" \
 		logging.video.enabled=false \
 		hydra.run.dir="outputs/${tag}-s${s}" \

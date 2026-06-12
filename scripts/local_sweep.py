@@ -33,9 +33,11 @@ def synthetic_target(s0: float, d: int, rng) -> "callable":
     return f
 
 
-def fit_cell(s0: float, d: int, n: int, lam: float, seed: int, penalty_order: int = 2) -> dict:
-    """Train a small MLP with the H^{penalty_order} penalty on n samples of a
-    smoothness-s0 target; return test MSE. Items 6-7 reduce to grids over this."""
+def fit_cell(s0: float, d: int, n: int, lam: float, seed: int, probes: int = 2) -> dict:
+    """Train a small MLP with the H^2 penalty (Hutchinson, `probes` probes) on n
+    samples of a smoothness-s0 target; return test MSE + wall-time. Items 6-7
+    reduce to grids over this; item 3 (probe-count, R4) sweeps `probes`."""
+    import time
     import torch
     from mbrl.regularization.hutchinson import hvp_penalty
     from mbrl.models.encoder import mlp
@@ -51,27 +53,35 @@ def fit_cell(s0: float, d: int, n: int, lam: float, seed: int, penalty_order: in
     opt = torch.optim.AdamW(net.parameters(), lr=1e-3)
     Xt, yt = torch.from_numpy(X), torch.from_numpy(y)
     gen = torch.Generator().manual_seed(seed)
+    t0 = time.perf_counter()
     for _ in range(2000):
         pred = net(Xt).squeeze(-1)
         loss = torch.nn.functional.mse_loss(pred, yt)
         if lam > 0:
             loss = loss + lam * hvp_penalty(lambda x: net(x).squeeze(-1), Xt,
-                                            n_probes=2, generator=gen)
+                                            n_probes=probes, generator=gen)
         opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
+    wall = time.perf_counter() - t0
 
     with torch.no_grad():
         mse = torch.nn.functional.mse_loss(
             net(torch.from_numpy(Xte)).squeeze(-1), torch.from_numpy(yte)).item()
-    return {"s0": s0, "d": d, "n": n, "lam": lam, "seed": seed, "test_mse": mse}
+    return {"s0": s0, "d": d, "n": n, "lam": lam, "seed": seed, "probes": probes,
+            "test_mse": mse, "wall_s": wall}
 
 
 GRIDS = {
     # item 7: error vs n at fixed (s, d); predicted slope n^{-2s/(2s+d)}
     "stone": dict(s0=[2.0], d=[2, 4], n=[64, 128, 256, 512, 1024, 2048],
-                  lam=[1e-3], seed=range(5)),
+                  lam=[1e-3], seed=range(5), probes=[2]),
     # item 6: does optimal lambda track target smoothness? s* = s0 below 2, ->2 above
     "smoothness": dict(s0=[0.5, 1.0, 1.5, 2.0, 3.0], d=[4], n=[512],
-                       lam=[0.0, 1e-4, 1e-3, 1e-2, 1e-1], seed=range(5)),
+                       lam=[0.0, 1e-4, 1e-3, 1e-2, 1e-1], seed=range(5), probes=[2]),
+    # item 3 (R4): probe-count vs accuracy/compute. Does test MSE plateau by N=2
+    # (the validated default) while wall-time grows ~linearly? — the enabling-lever
+    # claim, swept rather than asserted. Penalized arm only (lam>0).
+    "probe": dict(s0=[2.0], d=[4], n=[512], lam=[1e-3], seed=range(8),
+                  probes=[1, 2, 4, 8, 16, 32]),
 }
 
 
@@ -83,7 +93,8 @@ def main():
     args = p.parse_args()
 
     g = GRIDS[args.experiment]
-    cells = list(itertools.product(g["s0"], g["d"], g["n"], g["lam"], g["seed"]))
+    cells = list(itertools.product(g["s0"], g["d"], g["n"], g["lam"], g["seed"],
+                                   g.get("probes", [2])))
     print(f"{args.experiment}: {len(cells)} cells")
 
     from joblib import Parallel, delayed
