@@ -1,0 +1,37 @@
+# @package _global_
+# FOUNDING RECIPE (R1) — the validated DreamSmooth + Frobenius-Hessian recipe
+# that produced the headline HalfCheetah-v5 result: −165±41 → +98±23 at 200K,
+# 3 seeds (founding doc Part 4; ablation: Hessian-only −89, DreamSmooth-only
+# −137, combined +98). This is NOT the spectral stack.
+#
+# WHY THIS EXISTS: the base defaults drifted to the later "trace-chirp"
+# exploration (laplacian_trace + sin2chirp + auto_dose + lam0=1e-3), and no
+# config ever pinned the published recipe — so it was never re-run in this
+# apparatus. This is the REGRESSION TEST: does the apparatus reproduce its own
+# headline (+98)? If yes, we finally have a real working baseline; if no, there
+# is a regression that explains a session of all-negative spectral-stack runs.
+experiment:
+  name: founding
+model:
+  encoder: mlp              # deterministic encoder (no VAE)
+  dynamics: affine          # R15 affine-in-action
+  reward_heads: 1           # plain MLP reward (the published single-head model)
+spectral:
+  enabled: false            # MLP reward + Hutchinson Frobenius Hessian — NOT spectral RFF
+penalty:
+  form: frobenius           # R1/R5: ‖∇²R‖²_F Frobenius (the +98 headline form)
+  penalize_dynamics: false  # reward only (R10: never policy; T off)
+  n_probes: 2               # unbiased 2-probe (R4)
+  auto_dose:
+    enabled: false          # FIXED dose, not auto-dosed
+  schedule:
+    kind: cuberoot          # R12 residual decay to a non-zero floor
+    lam0: 0.5               # the published HalfCheetah dose (findings report §7)
+    floor: 1.0e-5
+imagination:
+  pessimism: 0.0            # single reward head → no ensemble pessimism
+smoothing:
+  enabled: true             # DreamSmooth (recipe §2.5)
+  sigma: 1.0                # episode-level, σ=1 (the published value)
+training:
+  total_env_steps: 200000   # the published budget
