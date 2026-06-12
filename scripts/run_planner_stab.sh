@@ -21,7 +21,8 @@ cd "$(dirname "$0")/.."
 NGPU="${NGPU:-$(nvidia-smi -L 2>/dev/null | grep -c GPU)}"
 [ "${NGPU:-0}" -lt 1 ] && NGPU=1
 JOBS="${JOBS:-$((2 * NGPU))}"
-STEPS="${STEPS:-700000}"
+STEPS="${STEPS:-500000}"
+DYNS="${DYNS:-affine gaussian}"   # PM: settle gaussian vs affine here too
 PY=".venv/bin/python"
 arm_idx=0
 mkdir -p results/gridlogs
@@ -29,7 +30,7 @@ if [ -z "${WANDB_API_KEY:-}" ] && [ -f .wandb_key ]; then
 	export WANDB_API_KEY="$(cat .wandb_key)"
 fi
 
-BASE="+experiment=champion env=halfcheetah model.dynamics=affine model.encoder=vae model.vae.beta=0.1 planner.enabled=true planner.d_model=256 planner.layers=4 planner.nhead=8 model.depth=4 model.hidden=512 spectral.n_features=1024 logging.video.enabled=false"
+BASE="+experiment=champion env=halfcheetah model.encoder=vae model.vae.beta=0.1 planner.enabled=true planner.d_model=256 planner.layers=4 planner.nhead=8 model.depth=4 model.hidden=512 spectral.n_features=1024 logging.video.enabled=false"
 
 # tag -> (horizon, align_weight)
 arm_cfg() {
@@ -44,18 +45,21 @@ arm_cfg() {
 throttle() { while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 5; done; }
 
 pids=()
-for arm in h15-a0 h15-a1 h30-a0 h30-a1; do
-	throttle
-	tag="stab-${arm}"
-	log="results/gridlogs/${tag}-s0.log"
-	gpu=$((arm_idx % NGPU)); arm_idx=$((arm_idx + 1))
-	echo "launching ${tag} (${STEPS} steps) on GPU ${gpu} -> ${log}"
-	OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 CUDA_VISIBLE_DEVICES="$gpu" \
-	$PY scripts/train.py $BASE seed=0 experiment.name="$tag" $(arm_cfg "$arm") \
-		training.total_env_steps="$STEPS" hydra.run.dir="outputs/${tag}-s0" \
-		> "$log" 2>&1 &
-	pids+=($!)
-	sleep 2
+for dyn in $DYNS; do
+	for arm in h15-a0 h15-a1 h30-a0 h30-a1; do
+		throttle
+		tag="stab-${dyn:0:3}-${arm}"   # stab-aff-h15-a0 | stab-gau-h30-a1 ...
+		log="results/gridlogs/${tag}-s0.log"
+		gpu=$((arm_idx % NGPU)); arm_idx=$((arm_idx + 1))
+		echo "launching ${tag} (dyn=${dyn}, ${STEPS} steps) on GPU ${gpu} -> ${log}"
+		OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 CUDA_VISIBLE_DEVICES="$gpu" \
+		$PY scripts/train.py $BASE seed=0 experiment.name="$tag" \
+			model.dynamics="$dyn" $(arm_cfg "$arm") \
+			training.total_env_steps="$STEPS" hydra.run.dir="outputs/${tag}-s0" \
+			> "$log" 2>&1 &
+		pids+=($!)
+		sleep 2
+	done
 done
 
 n=${#pids[@]}
