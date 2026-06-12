@@ -185,3 +185,24 @@ proof) is owed; (b) verify the −80 winner actually MOVES (HalfCheetah rewards 
 −80 < clean-champion −160 is suspicious — could be a do-nothing low-rate policy); (c) n=3,
 β1e-4 unstable. NEXT: re-run NOISE=0.0 half; log forward-velocity; if it holds, the curved-
 latent (GFT) leg is the follow-up.
+
+
+## 8. CORRECTION (clean sweep in): the §7 result does NOT hold
+
+Clean β-sweep completed (18/18). Frontier (eval | rate nats): determ -166±85 | β0
+-119±103 (500) | β1e-4 -210±103 (80) | β1e-3 -138±71 (33) | β1e-2 -64±16 (17) |
+β1e-1 -40±13 (5.7). The PREDICTED contrast (clean-flat vs noisy-elbow) FAILED:
+BOTH regimes improve with compression, so the effect is NOT noise-specific denoising.
+
+Worse, the confound is now the leading explanation. Every return is negative; the
+"best" arms (-40 clean, -80 noisy) sit NEAR ZERO. On HalfCheetah-v5 (r = fwd_vel -
+ctrl_cost) a runner scores POSITIVE, flailing scores very negative, inaction ≈ 0.
+None of these arms learned to run — the compressed channel "wins" by producing a
+PASSIVE low-energy policy that dodges control cost, not better control. The
+"IB win" of §7 is most likely this CONSERVATISM ARTIFACT.
+
+VERDICT: latent-as-channel is NOT supported by this experiment. Mandatory before
+any claim: log forward velocity (is the -40 cheetah standing still?). Deeper issue:
+champion-on-HalfCheetah never learns to run at this config (all arms negative incl.
+prior champion -160s) -> this task CANNOT test the hypothesis. Need a baseline that
+reaches positive return, or a task where inaction is not the local optimum.
