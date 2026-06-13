@@ -163,6 +163,7 @@ def main(cfg: DictConfig):
         iteration = env_steps // cfg.training.steps_per_iter
         if iteration % cfg.training.eval_every_iters == 0:
             metrics["eval/return"], metrics["eval/x_velocity"] = evaluate(trainer, cfg, device)
+            trainer.observe_return(metrics["eval/return"])   # feed the return-gate
             eval_count += 1
             if video_enabled and eval_count % video_every == 0:
                 # never let a headless/render failure kill training

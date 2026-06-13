@@ -20,14 +20,19 @@ from mbrl.utils.checkpoint import CheckpointManager
 from mbrl.utils.seeding import seed_everything
 
 
-def _cfg(enabled=True, mode="shared", couple_weight=0.0, **op):
+def _cfg(enabled=True, mode="shared", couple_weight=0.0, penalize_reward=True,
+         operator_p=None, **op):
     opw = {f"w_{k}": op.get(f"w_{k}", 0.0) for k in ("normal", "smooth", "spread", "radius")}
+    dl = {"enabled": enabled, "mode": mode, "d_dim": 0, "p_dim": 0,
+          "couple_weight": couple_weight, "p_consistency_weight": 1.0,
+          "penalize_reward": penalize_reward}
+    if operator_p is not None:
+        dl["operator_p"] = operator_p
     return OmegaConf.create({
         "seed": 0,
         "model": {"latent_dim": 4, "hidden": 32, "depth": 1, "ema_decay": 0.99,
                   "dynamics": "operator", "operator": {"structure": "none", "rank": 0, **opw},
-                  "dual_latent": {"enabled": enabled, "mode": mode, "d_dim": 0, "p_dim": 0,
-                                  "couple_weight": couple_weight, "p_consistency_weight": 1.0}},
+                  "dual_latent": dl},
         "penalty": {"n_probes": 2, "penalize_dynamics": False, "form": "frobenius",
                     "auto_dose": {"enabled": False},
                     "schedule": {"kind": "constant", "lam0": 1e-3, "t0": 100, "floor": 1e-6}},
@@ -100,6 +105,31 @@ def test_twin_p_consistency_and_coupling_and_dual_operators():
     bm = t.behaviour_update(t.encoder(_batch()[0]).detach())    # control rolls op_p
     assert math.isfinite(bm["loss/policy"])
     assert t.act(t.encoder(_batch()[0]).detach()).shape == (16, 2)
+
+
+def test_penalize_reward_off_skips_penalty():
+    """penalize_reward=false (the 'p should be rough' arm): no curvature penalty —
+    penalty/value and penalty/lambda are 0, but the model still trains."""
+    seed_everything(0)
+    t = Trainer(_cfg(mode="twin", penalize_reward=False), obs_dim=3, action_dim=2)
+    assert not t.dual_penalize_reward
+    m = t.model_update(_batch())
+    assert m["penalty/value"] == 0.0 and m["penalty/lambda"] == 0.0
+    assert math.isfinite(m["loss/total"])
+
+
+def test_twin_differential_regularization_smooth_d_rough_p():
+    """Smooth dynamics latent, rough policy latent: op_d gets the structural priors
+    (op/pen_*_d present), op_p gets none (operator_p all-zero ⇒ no op/pen_*_p)."""
+    seed_everything(0)
+    t = Trainer(_cfg(mode="twin", w_normal=0.05, w_smooth=0.05,
+                     operator_p={"w_normal": 0.0, "w_smooth": 0.0,
+                                 "w_spread": 0.0, "w_radius": 0.0}),
+                obs_dim=3, action_dim=2)
+    assert t.op_w["smooth"] == 0.05 and t.op_w_p["smooth"] == 0.0
+    m = t.model_update(_batch())
+    assert "op/pen_smooth_d" in m and "op/pen_normal_d" in m   # d regularized
+    assert "op/pen_smooth_p" not in m                          # p left rough
 
 
 @pytest.mark.parametrize("mode", ["shared", "twin"])

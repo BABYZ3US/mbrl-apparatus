@@ -123,6 +123,14 @@ class Trainer:
                 couple_dim=int(_dl.get("couple_dim", 0))).to(device)
             self.couple_w = float(_dl.get("couple_weight", 0.0))
             self.pconsist_w = float(_dl.get("p_consistency_weight", 1.0))
+            # reward-curvature penalty on p: optional (twin wants p ROUGH — see
+            # _model_update_dual). Per-operator structural weights let the dynamics
+            # operator op_d be regularized smooth while the policy operator op_p is
+            # left rough: operator_p overrides fall back to model.operator.w_* (op_d).
+            self.dual_penalize_reward = bool(_dl.get("penalize_reward", True))
+            _opp = dict(_dl.get("operator_p", {}) or {})
+            self.op_w_p = {kk: float(_opp.get(f"w_{kk}", self.op_w.get(kk, 0.0)))
+                           for kk in ("normal", "smooth", "spread", "radius")}
         # heads read the POLICY latent p in dual mode (dim p_dim), else the backbone z
         rk = self.dual.p_dim if self.dual_latent else k
         self.reward = RewardModel(rk, action_dim, h, d, task_dim=task_dim,
@@ -229,6 +237,20 @@ class Trainer:
                           "a trained reward model (non-spectral or spectral+"
                           "encoder_aux); disabling — lambda follows the schedule.")
                 self.dg_enabled = False
+
+        # Return-gated lambda (penalty.return_gate, PM 2026-06-13): a WEAK,
+        # never-zero multiplier on lam(t) keyed on ACTUAL eval return. Full lam
+        # while return is low; relaxed toward `floor` as return climbs to its
+        # running best. Keyed on actual (not imagined) return => reward
+        # exploitation keeps return low => lam stays high (self-correcting).
+        # Fed by Trainer.observe_return() from the eval loop; ret_ema/lo/hi are
+        # checkpointed (no new RNG -> bitwise resume). rg_gate_now stays 1.0 off.
+        rg = cfg.penalty.get("return_gate", None)
+        self.rg_enabled = bool(rg and rg.get("enabled", False))
+        self.rg_floor = float(rg.get("floor", 0.5)) if rg else 0.5
+        self.rg_decay = float(rg.get("decay", 0.95)) if rg else 0.95
+        self.ret_ema, self.ret_lo, self.ret_hi = None, None, None  # checkpointed
+        self.rg_gate_now = 1.0   # current gate factor (1.0 = disabled / full lam)
 
         # Spectral reward path (spectral.enabled): the reward is an ensemble of
         # closed-form RFF ridge heads over the SAME coords as the penalty
@@ -352,7 +374,7 @@ class Trainer:
         # self.dg_gate_now (disagreement gate) scales the schedule uniformly so
         # the spectral penalty releases with the reward ensemble's convergence
         # too; it is 1.0 when the gate is disabled (no behaviour change).
-        theta = [c * self.dg_gate_now * self.lam(t + s)
+        theta = [c * self.dg_gate_now * self.rg_gate_now * self.lam(t + s)
                  for c, s in zip(self.spec_coefs, self.spec_shifts)]
         return poly_weights(head.w2.sqrt(), self.spec_degrees, theta)
 
@@ -693,8 +715,9 @@ class Trainer:
             lam_t = self.lam(self.step)
         # disagreement-gated lambda (MLP path): the gate was computed early
         # (self.dg_gate_now, before the spectral refit so closed-form theta sees
-        # it too); here it scales the Hutchinson penalty's lambda.
-        lam_t = lam_t * self.dg_gate_now
+        # it too); here it scales the Hutchinson penalty's lambda. The return-gate
+        # (rg_gate_now, set on eval) composes multiplicatively — both in [floor,1].
+        lam_t = lam_t * self.dg_gate_now * self.rg_gate_now
         if rew_loss is None:  # spectral: the MLP reward fit is skipped entirely
             loss = dyn_loss + lam_t * pen
             # ENCODER-GROUNDING AUX (2026-06-08, HalfCheetah collapse): in
@@ -772,6 +795,7 @@ class Trainer:
 
         out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss_val,
                "penalty/value": pen_val, "penalty/lambda": lam_t,
+               "penalty/return_gate": self.rg_gate_now,
                "loss/total": loss.item(), "step": self.step, **spec_metrics,
                **dyn_calib, **dg_metrics, **info_metrics, **op_metrics}
         if self.lam0_auto is not None:
@@ -984,37 +1008,49 @@ class Trainer:
                 self.symlog_bound = max(self.symlog_bound, bm)
         rew_loss = F.mse_loss(self.reward(p, a, tau), r_target)
 
-        # isotropic curvature penalty on the reward, in p-coords (R10/R16; detached p)
-        if self.cfg.penalty.get("form", "frobenius") == "laplacian_trace":
-            penalty_fn = functools.partial(
-                laplacian_trace_penalty, clamp=self.cfg.penalty.get("clamp_trace", True))
+        # isotropic curvature penalty on the reward, in p-coords (R10/R16; detached p).
+        # dual_penalize_reward=false skips it entirely (and the hvp compute): in twin
+        # mode the policy latent p is meant to be ROUGH/bumpy (it carries sharp reward/
+        # value structure) while the DYNAMICS latent d is kept smooth by op_d's priors
+        # — so the reward-curvature penalty can be the wrong tool on p (PM 2026-06-13).
+        lam_t = self.lam(self.step) * self.rg_gate_now
+        if self.dual_penalize_reward:
+            if self.cfg.penalty.get("form", "frobenius") == "laplacian_trace":
+                penalty_fn = functools.partial(
+                    laplacian_trace_penalty, clamp=self.cfg.penalty.get("clamp_trace", True))
+            else:
+                penalty_fn = hvp_penalty
+            parts = [p.detach(), a]
+            if tau is not None and self.cfg.penalty.get("include_task", True):
+                parts.append(tau)
+            x_pen = torch.cat(parts, dim=-1)
+            if tau is not None and not self.cfg.penalty.get("include_task", True):
+                fn = lambda x: self.reward.on_concat(torch.cat([x, tau.detach()], dim=-1))
+            else:
+                fn = self.reward.on_concat
+            pen = penalty_fn(fn, x_pen, n_probes=self.cfg.penalty.n_probes, generator=self.gen)
+            pen_val = pen.item()
+            loss = dyn_loss + rew_loss + lam_t * pen
         else:
-            penalty_fn = hvp_penalty
-        parts = [p.detach(), a]
-        if tau is not None and self.cfg.penalty.get("include_task", True):
-            parts.append(tau)
-        x_pen = torch.cat(parts, dim=-1)
-        if tau is not None and not self.cfg.penalty.get("include_task", True):
-            fn = lambda x: self.reward.on_concat(torch.cat([x, tau.detach()], dim=-1))
-        else:
-            fn = self.reward.on_concat
-        pen = penalty_fn(fn, x_pen, n_probes=self.cfg.penalty.n_probes, generator=self.gen)
-        pen_val = pen.item()
-        lam_t = self.lam(self.step)
-        loss = dyn_loss + rew_loss + lam_t * pen
+            pen_val, lam_t = 0.0, 0.0
+            loss = dyn_loss + rew_loss
         if vae_terms is not None:
             loss = loss + vae_terms
 
-        # operator structural priors (per operator) + spectral diagnostics
+        # operator structural priors (per operator) + spectral diagnostics. In twin
+        # mode op_d (dynamics) uses op_w and op_p (policy) uses op_w_p — so the
+        # dynamics space can be regularized SMOOTH while the policy space is left
+        # ROUGH (e.g. op_w.w_smooth>0, op_w_p.w_smooth=0).
         op_metrics = {}
         for i, op in enumerate(dl.operators()):
             tag = "" if dl.mode == "shared" else ("_d" if i == 0 else "_p")
             zin = z.detach() if dl.mode == "shared" else (
                 d.detach() if i == 0 else p.detach())
+            w = self.op_w_p if (dl.mode == "twin" and i == 1) else self.op_w
             op_metrics |= {f"{kk}{tag}": vv for kk, vv in op.spectral_summary(zin).items()}
-            if any(self.op_w.values()):
+            if any(w.values()):
                 sp = op.structural_penalties(zin)
-                loss = loss + sum(self.op_w[kk] * sp[kk] for kk in self.op_w)
+                loss = loss + sum(w[kk] * sp[kk] for kk in w)
                 op_metrics |= {f"op/pen_{kk}{tag}": float(sp[kk].detach()) for kk in sp}
 
         # twin: ground op_p (p-consistency) + weak coupling of the two geometries
@@ -1041,6 +1077,7 @@ class Trainer:
 
         out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss.item(),
                "penalty/value": pen_val, "penalty/lambda": lam_t,
+               "penalty/return_gate": self.rg_gate_now,
                "loss/total": loss.item(), "step": self.step,
                "latent/z_std": z.detach().std(0).mean().item(),
                **op_metrics, **dual_metrics}
@@ -1128,6 +1165,25 @@ class Trainer:
                 "imagine/return_var": returns.var().item(),
                 "imagine/align": align_val, "actor/grad_norm": float(gnorm)}
 
+    def observe_return(self, ep_return: float) -> None:
+        """Feed the latest ACTUAL eval return to the return-gate
+        (penalty.return_gate). Updates the return EMA + running [lo,hi] range and
+        recomputes rg_gate_now in [floor,1]: ~1 at the worst return seen, ~floor at
+        the best — so lambda decays as the policy genuinely improves but rises again
+        if return falls (self-correcting; exploitation keeps actual return low).
+        No-op when the gate is disabled. ret_ema/lo/hi are checkpointed."""
+        import math as _m
+        if not self.rg_enabled or not _m.isfinite(ep_return):
+            return
+        self.ret_ema = (ep_return if self.ret_ema is None
+                        else self.rg_decay * self.ret_ema
+                        + (1 - self.rg_decay) * ep_return)
+        self.ret_lo = self.ret_ema if self.ret_lo is None else min(self.ret_lo, self.ret_ema)
+        self.ret_hi = self.ret_ema if self.ret_hi is None else max(self.ret_hi, self.ret_ema)
+        span = self.ret_hi - self.ret_lo
+        frac = min(max((self.ret_ema - self.ret_lo) / span, 0.0), 1.0) if span > 1e-8 else 0.0
+        self.rg_gate_now = self.rg_floor + (1.0 - self.rg_floor) * (1.0 - frac)
+
     @torch.no_grad()
     def act(self, z: torch.Tensor, tau: torch.Tensor | None = None) -> torch.Tensor:
         """Execution action selection (B, act): the planner's receding-horizon
@@ -1173,6 +1229,9 @@ class Trainer:
                 # disagreement-gate EMA state (bitwise resume)
                 "dis_ema": self.dis_ema, "dis_peak": self.dis_peak,
                 "spec_head_dis": self._spec_head_dis,
+                # return-gate EMA + range (bitwise resume)
+                "ret_ema": self.ret_ema, "ret_lo": self.ret_lo,
+                "ret_hi": self.ret_hi, "rg_gate_now": self.rg_gate_now,
                 "hutchinson_gen": self.gen.get_state()}
         if self.spec_enabled:
             # spectral reward: per-head (W, b, c) + the rolling cache + refit
@@ -1214,6 +1273,10 @@ class Trainer:
         self.dis_ema = sd.get("dis_ema", None)
         self.dis_peak = sd.get("dis_peak", 0.0)
         self._spec_head_dis = sd.get("spec_head_dis", None)
+        self.ret_ema = sd.get("ret_ema", None)
+        self.ret_lo = sd.get("ret_lo", None)
+        self.ret_hi = sd.get("ret_hi", None)
+        self.rg_gate_now = sd.get("rg_gate_now", 1.0)
         self.ad_count = sd.get("ad_count", 0)
         self.ad_fit_sum = sd.get("ad_fit_sum", 0.0)
         self.ad_pen_sum = sd.get("ad_pen_sum", 0.0)
