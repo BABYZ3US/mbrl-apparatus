@@ -128,9 +128,9 @@ class Trainer:
             # operator op_d be regularized smooth while the policy operator op_p is
             # left rough: operator_p overrides fall back to model.operator.w_* (op_d).
             self.dual_penalize_reward = bool(_dl.get("penalize_reward", True))
-            _opp = dict(_dl.get("operator_p", {}) or {})
-            self.op_w_p = {kk: float(_opp.get(f"w_{kk}", self.op_w.get(kk, 0.0)))
-                           for kk in ("normal", "smooth", "spread", "radius")}
+            # smooth_p: regularize op_p like op_d (conjoined) or leave p rough (separate)
+            self.op_w_p = (dict(self.op_w) if bool(_dl.get("smooth_p", True))
+                           else {kk: 0.0 for kk in ("normal", "smooth", "spread", "radius")})
         # heads read the POLICY latent p in dual mode (dim p_dim), else the backbone z
         rk = self.dual.p_dim if self.dual_latent else k
         self.reward = RewardModel(rk, action_dim, h, d, task_dim=task_dim,

@@ -52,10 +52,10 @@ model:
                             # p-coords. Set FALSE to let the policy latent p be ROUGH
                             # (carry sharp reward/value structure) — the "do we even
                             # need lambda for twin?" ablation (PM 2026-06-13).
-    operator_p: {}      # twin: per-operator structural weights for op_p (policy
-                        # operator); keys w_normal/w_smooth/w_spread/w_radius. Empty =
-                        # inherit model.operator.w_*. Set to 0s to keep p ROUGH while
-                        # op_d (model.operator.w_*) keeps the dynamics latent SMOOTH.
+    smooth_p: true      # twin: regularize the policy operator op_p with the same
+                        # structural priors as op_d (model.operator.w_*) = CONJOINED
+                        # smoothness. false = leave p ROUGH (op_p unregularized) while
+                        # op_d keeps the dynamics latent SMOOTH = SEPARATE smoothness.
   latent_dim: 4         # capped at 4x obs_dim (user rule v2: wider latent ->
                         # more null nodes / longer tails; e.g. 12 on Pendulum)
   hidden: 256

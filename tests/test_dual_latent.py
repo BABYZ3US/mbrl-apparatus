@@ -21,13 +21,11 @@ from mbrl.utils.seeding import seed_everything
 
 
 def _cfg(enabled=True, mode="shared", couple_weight=0.0, penalize_reward=True,
-         operator_p=None, **op):
+         smooth_p=True, **op):
     opw = {f"w_{k}": op.get(f"w_{k}", 0.0) for k in ("normal", "smooth", "spread", "radius")}
     dl = {"enabled": enabled, "mode": mode, "d_dim": 0, "p_dim": 0,
           "couple_weight": couple_weight, "p_consistency_weight": 1.0,
-          "penalize_reward": penalize_reward}
-    if operator_p is not None:
-        dl["operator_p"] = operator_p
+          "penalize_reward": penalize_reward, "smooth_p": smooth_p}
     return OmegaConf.create({
         "seed": 0,
         "model": {"latent_dim": 4, "hidden": 32, "depth": 1, "ema_decay": 0.99,
@@ -122,9 +120,7 @@ def test_twin_differential_regularization_smooth_d_rough_p():
     """Smooth dynamics latent, rough policy latent: op_d gets the structural priors
     (op/pen_*_d present), op_p gets none (operator_p all-zero ⇒ no op/pen_*_p)."""
     seed_everything(0)
-    t = Trainer(_cfg(mode="twin", w_normal=0.05, w_smooth=0.05,
-                     operator_p={"w_normal": 0.0, "w_smooth": 0.0,
-                                 "w_spread": 0.0, "w_radius": 0.0}),
+    t = Trainer(_cfg(mode="twin", w_normal=0.05, w_smooth=0.05, smooth_p=False),
                 obs_dim=3, action_dim=2)
     assert t.op_w["smooth"] == 0.05 and t.op_w_p["smooth"] == 0.0
     m = t.model_update(_batch())
