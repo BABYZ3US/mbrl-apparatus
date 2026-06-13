@@ -177,6 +177,45 @@ runpodctl config --apiKey <ACCOUNT_API_KEY>
 
 ---
 
+## 8. Drive the Studio against the pod (live remote control)
+
+The **MBRL Studio** (Godot GUI, `../godot_studio/`) runs **locally on your Mac** —
+it needs a display, the pod does not have one. It talks to the apparatus over ONE TCP
+socket served by `scripts/studio_bridge_server.py`: it pulls runs/metrics/sweeps for the
+viz panels AND, on **submit.spec / submit.sweep**, launches `scripts/train.py` **on the
+pod's GPU**. So the loop becomes: author a model graph locally → submit → it trains on
+RunPod → the Run Monitor / Plots / Ablation panels stream the result back. No W&B round-trip
+needed for the live view (W&B is still the durable rendezvous per the golden rule).
+
+**Security:** the bridge server is **unauthenticated** and submit launches arbitrary
+training on its host. NEVER bind it to RunPod's public IP. Keep it on `127.0.0.1` (the
+default) and reach it over an **SSH local-forward** — the same key/host you already use.
+
+**On the pod** — start the server bound to localhost (from `/workspace/mbrl`):
+```bash
+.venv/bin/python scripts/studio_bridge_server.py --host 127.0.0.1 --port 9009
+# add --dry-run first to verify the wire without spawning real training;
+# add --strict to reject specs that trip the spectral house rules.
+```
+
+**On your Mac** — forward the pod's bridge port to localhost, then launch the studio
+pointed at it. The helper uses the in-repo `runpod` key and the same `root@<ip> -p <port>`
+line from the Connect tab (§1):
+```bash
+cd ~/Claude/Projects/math/godot_studio
+./tools/tunnel_runpod.sh root@<pod-ip> -p <ssh-port> --launch   # tunnel + studio, one command
+# — or in two terminals —
+./tools/tunnel_runpod.sh root@<pod-ip> -p <ssh-port>            # terminal 1: holds the tunnel
+./run_studio.sh --port 9009                                     # terminal 2: dials 127.0.0.1:9009
+```
+`--port 9009` is the launch-time backend override: the shell upserts+selects a `launch`
+profile (visible in the status-bar backend picker) and dials it on boot. Use
+`--apparatus 127.0.0.1:9010` / `--local 9010` if 9009 is taken locally; `--host <ip>
+--port <p>` points at a non-tunnel address. The pod's ip:port changes on every restart —
+re-copy it each time.
+
+---
+
 ## Gotchas (learned the hard way)
 
 - **Container restarts wipe `~/.ssh` and `~/.netrc`** (only `/workspace`
