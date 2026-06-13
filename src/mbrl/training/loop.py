@@ -17,8 +17,8 @@ import torch
 import torch.nn.functional as F
 
 from ..models import (Encoder, EMAEncoder, VAEEncoder, CustomEncoder, AffineDynamics,
-                      GaussianAffineDynamics, FullMLPDynamics, RewardModel,
-                      Policy, ValueFn)
+                      GaussianAffineDynamics, FullMLPDynamics, OperatorDynamics,
+                      RewardModel, Policy, ValueFn, DualLatent)
 from ..models.ensemble import EnsembleAffineDynamics
 from ..models.planner import SequencePlanner
 from ..models.reward import symlog, symexp
@@ -66,8 +66,10 @@ class Trainer:
         # imagination becomes a stochastic rollout with gradient flow.
         _dyn_kind = str(cfg.model.get("dynamics", "affine"))
         self.dyn_stochastic = _dyn_kind == "gaussian"
+        self.dyn_operator = _dyn_kind == "operator"
+        self.op_w = {}   # operator structural-prior weights (set below if operator)
         dyn_cls = {"affine": AffineDynamics, "gaussian": GaussianAffineDynamics,
-                   "mlp": FullMLPDynamics}[_dyn_kind]
+                   "mlp": FullMLPDynamics, "operator": OperatorDynamics}[_dyn_kind]
         if _dyn_kind == "mlp":
             import warnings as _w2
             _w2.warn("[dynamics] mlp is the run-9 R15-ablation arm: action "
@@ -83,12 +85,47 @@ class Trainer:
                 f"deterministic affine maps, R15-safe); got dynamics='{_dyn_kind}'")
         if self.dyn_ensemble:
             self.dynamics = EnsembleAffineDynamics(k, action_dim, _n_ens, h, d).to(device)
+        elif self.dyn_operator:
+            # operator-field dynamics z'=A(z)z+B(z)a (R15-safe; A=I+Â near-I init).
+            # Structural priors default OFF (w_*=0) -> pure operator map; turn them
+            # on to keep A a coherent bundle (normal/smooth/spread/radius).
+            _op = dict(cfg.model.get("operator", {}) or {})
+            self.dynamics = OperatorDynamics(
+                k, action_dim, h, d,
+                structure=str(_op.get("structure", "none")),
+                rank=int(_op.get("rank", 0))).to(device)
+            self.op_w = {kk: float(_op.get(f"w_{kk}", 0.0))
+                         for kk in ("normal", "smooth", "spread", "radius")}
         else:
             self.dynamics = dyn_cls(k, action_dim, h, d).to(device)
         # epistemic discount on imagined reward: r -= coef * ensemble disagreement
         self.ens_pessimism = float((cfg.get("algo", {}) or {}).get("ensemble_pessimism", 0.0) or 0.0)
         self.symlog = bool(cfg.model.get("symlog_reward", False))
-        self.reward = RewardModel(k, action_dim, h, d, task_dim=task_dim,
+        # DUAL-LATENT controlled-operator model (model.dual_latent.enabled): shared
+        # encoder z splits into a dynamics latent d=D(z) and a policy latent p=P(z);
+        # reward/policy/value read p. A SEPARATE, gated path (_model_update_dual /
+        # _behaviour_update_dual) — when off, the validated z-based loop is byte-
+        # for-byte unchanged. Requires the operator dynamics (it owns its own
+        # operators); incompatible with spectral/ensemble (a clean fresh arm).
+        _dl = dict(cfg.model.get("dual_latent", {}) or {})
+        self.dual_latent = bool(_dl.get("enabled", False))
+        self.dual = None
+        if self.dual_latent:
+            if not self.dyn_operator:
+                raise ValueError("model.dual_latent requires model.dynamics=operator")
+            if bool((cfg.get("spectral", {}) or {}).get("enabled", False)) or self.dyn_ensemble:
+                raise ValueError("model.dual_latent is incompatible with spectral/ensemble")
+            self.dual = DualLatent(
+                k, action_dim, h, d, mode=str(_dl.get("mode", "shared")),
+                d_dim=int(_dl.get("d_dim", 0)), p_dim=int(_dl.get("p_dim", 0)),
+                op_structure=str(cfg.model.get("operator", {}).get("structure", "none")),
+                op_rank=int(cfg.model.get("operator", {}).get("rank", 0)),
+                couple_dim=int(_dl.get("couple_dim", 0))).to(device)
+            self.couple_w = float(_dl.get("couple_weight", 0.0))
+            self.pconsist_w = float(_dl.get("p_consistency_weight", 1.0))
+        # heads read the POLICY latent p in dual mode (dim p_dim), else the backbone z
+        rk = self.dual.p_dim if self.dual_latent else k
+        self.reward = RewardModel(rk, action_dim, h, d, task_dim=task_dim,
                                   n_heads=int(cfg.model.get("reward_heads", 1))).to(device)
         self.pessimism = float(cfg.imagination.get("pessimism", 0.0))
         # Data-driven symexp clamp (replaces the fixed +-20): running max of
@@ -99,8 +136,8 @@ class Trainer:
         # grid). Init 1.0 = conservative floor before any real data is seen.
         self.symlog_bound = 1.0  # checkpointed (bitwise resume)
         self.symexp_margin = float(cfg.imagination.get("symexp_margin", 1.5))
-        self.policy = Policy(k, action_dim, h, d, task_dim=task_dim).to(device)
-        self.value = ValueFn(k, h, d, task_dim=task_dim).to(device)
+        self.policy = Policy(rk, action_dim, h, d, task_dim=task_dim).to(device)
+        self.value = ValueFn(rk, h, d, task_dim=task_dim).to(device)
         self.value_target = copy.deepcopy(self.value).requires_grad_(False)
 
         # Transformer action-sequence planner (planner.enabled): REPLACES the
@@ -118,9 +155,12 @@ class Trainer:
                 d_model=int(pl.get("d_model", 128)), nhead=int(pl.get("nhead", 4)),
                 layers=int(pl.get("layers", 2)), task_dim=task_dim).to(device)
 
-        self.model_opt = torch.optim.AdamW(
-            [*self.encoder.parameters(), *self.dynamics.parameters(), *self.reward.parameters()],
-            lr=cfg.optim.model_lr)
+        # dual-latent owns its own operator(s)+projections (model_opt trains them);
+        # the unused self.dynamics gets no gradient and is simply never stepped.
+        _model_params = [*self.encoder.parameters(), *self.reward.parameters()]
+        _model_params += (list(self.dual.parameters()) if self.dual_latent
+                          else list(self.dynamics.parameters()))
+        self.model_opt = torch.optim.AdamW(_model_params, lr=cfg.optim.model_lr)
         actor_params = (self.planner if self.use_planner else self.policy).parameters()
         self.policy_opt = torch.optim.AdamW(actor_params, lr=cfg.optim.policy_lr)
         self.value_opt = torch.optim.AdamW(self.value.parameters(), lr=cfg.optim.value_lr)
@@ -423,6 +463,8 @@ class Trainer:
 
     # ---------------- model learning ----------------
     def model_update(self, batch) -> dict:
+        if self.dual_latent:
+            return self._model_update_dual(batch)
         if self.task_dim:
             obs, a, r, obs_next, tau = (x.to(self.device) for x in batch)
         else:
@@ -674,6 +716,19 @@ class Trainer:
         if self.spec_enabled:   # collapse early-warning, ~free
             spec_metrics["latent/z_std"] = z.detach().std(0).mean().item()
 
+        # operator-field structural priors (model.dynamics=operator): keep A(z) a
+        # coherent operator bundle. Penalties on DETACHED z (founding-doc latent-
+        # coord discipline, R16) -> they shape the A/B nets, not the encoder.
+        # spectral_summary is logged every step (cheap, no grad); the weighted
+        # penalty term is added only when some w_* > 0 (default all 0 = no-op).
+        op_metrics = {}
+        if self.dyn_operator:
+            op_metrics = self.dynamics.spectral_summary(z.detach())
+            if any(self.op_w.values()):
+                sp = self.dynamics.structural_penalties(z.detach())
+                loss = loss + sum(self.op_w[kk] * sp[kk] for kk in self.op_w)
+                op_metrics |= {f"op/pen_{kk}": float(sp[kk].detach()) for kk in sp}
+
         self.model_opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 100.0)
@@ -718,7 +773,7 @@ class Trainer:
         out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss_val,
                "penalty/value": pen_val, "penalty/lambda": lam_t,
                "loss/total": loss.item(), "step": self.step, **spec_metrics,
-               **dyn_calib, **dg_metrics, **info_metrics}
+               **dyn_calib, **dg_metrics, **info_metrics, **op_metrics}
         if self.lam0_auto is not None:
             out["penalty/lam0_auto"] = self.lam0_auto
         return out
@@ -768,6 +823,8 @@ class Trainer:
 
     # ---------------- behaviour learning (Dreamer lambda-returns) ----------------
     def behaviour_update(self, z0: torch.Tensor, tau0: torch.Tensor | None = None) -> dict:
+        if self.dual_latent:
+            return self._behaviour_update_dual(z0, tau0)
         cfg_i = self.cfg.imagination
         gamma, lam_ret = cfg_i.gamma, cfg_i.get("lambda_", 0.95)
         H = self._imagination_horizon()
@@ -886,6 +943,191 @@ class Trainer:
                 "imagine/align": align_val, "actor/grad_norm": float(gnorm),
                 **pen_stats}
 
+    # ---------------- dual-latent path (model.dual_latent.enabled) ----------------
+    def _model_update_dual(self, batch) -> dict:
+        """Shared encoder z; dynamics latent d=D(z) fit by the operator in d-space;
+        policy latent p=P(z) carries the reward head + the curvature penalty (R10/
+        R16, now in p-coords). Twin mode also fits op_p (p-consistency) and the weak
+        coupling L_couple. No spectral/auto-dose/dgate — a clean fresh arm."""
+        import functools, math as _math
+        if self.task_dim:
+            obs, a, r, obs_next, tau = (x.to(self.device) for x in batch)
+        else:
+            obs, a, r, obs_next = (x.to(self.device) for x in batch)
+            tau = None
+        vae_terms = vae_metrics = None
+        if self.enc_vae:
+            recon, kl, z = self.encoder.losses(obs)
+            vae_terms = self.vae_recon_w * recon + self.vae_beta * kl
+            vae_metrics = {"vae/recon": recon.item(), "vae/kl": kl.item()}
+        else:
+            z = self.encoder(obs)
+        with torch.no_grad():
+            z_next_tgt = self.ema(obs_next)
+        dl = self.dual
+        d, p = dl.d_of(z), dl.p_of(z)
+        with torch.no_grad():
+            d_next, p_next = dl.d_of(z_next_tgt), dl.p_of(z_next_tgt)
+
+        # dynamics fit, scored in d-space (shared: roll backbone z, require D(z')
+        # predictable; twin: op_d predicts d')
+        if dl.mode == "shared":
+            dyn_loss = F.mse_loss(dl.d_of(dl.op(z, a)), d_next)
+        else:
+            dyn_loss = F.mse_loss(dl.op_d(d, a), d_next)
+
+        # reward fit in p-coords
+        r_target = symlog(r) if self.symlog else r
+        if self.symlog:
+            bm = r_target.abs().max().item()
+            if np.isfinite(bm):
+                self.symlog_bound = max(self.symlog_bound, bm)
+        rew_loss = F.mse_loss(self.reward(p, a, tau), r_target)
+
+        # isotropic curvature penalty on the reward, in p-coords (R10/R16; detached p)
+        if self.cfg.penalty.get("form", "frobenius") == "laplacian_trace":
+            penalty_fn = functools.partial(
+                laplacian_trace_penalty, clamp=self.cfg.penalty.get("clamp_trace", True))
+        else:
+            penalty_fn = hvp_penalty
+        parts = [p.detach(), a]
+        if tau is not None and self.cfg.penalty.get("include_task", True):
+            parts.append(tau)
+        x_pen = torch.cat(parts, dim=-1)
+        if tau is not None and not self.cfg.penalty.get("include_task", True):
+            fn = lambda x: self.reward.on_concat(torch.cat([x, tau.detach()], dim=-1))
+        else:
+            fn = self.reward.on_concat
+        pen = penalty_fn(fn, x_pen, n_probes=self.cfg.penalty.n_probes, generator=self.gen)
+        pen_val = pen.item()
+        lam_t = self.lam(self.step)
+        loss = dyn_loss + rew_loss + lam_t * pen
+        if vae_terms is not None:
+            loss = loss + vae_terms
+
+        # operator structural priors (per operator) + spectral diagnostics
+        op_metrics = {}
+        for i, op in enumerate(dl.operators()):
+            tag = "" if dl.mode == "shared" else ("_d" if i == 0 else "_p")
+            zin = z.detach() if dl.mode == "shared" else (
+                d.detach() if i == 0 else p.detach())
+            op_metrics |= {f"{kk}{tag}": vv for kk, vv in op.spectral_summary(zin).items()}
+            if any(self.op_w.values()):
+                sp = op.structural_penalties(zin)
+                loss = loss + sum(self.op_w[kk] * sp[kk] for kk in self.op_w)
+                op_metrics |= {f"op/pen_{kk}{tag}": float(sp[kk].detach()) for kk in sp}
+
+        # twin: ground op_p (p-consistency) + weak coupling of the two geometries
+        dual_metrics = {}
+        if dl.mode == "twin":
+            pcons = F.mse_loss(dl.op_p(p, a), p_next)
+            loss = loss + self.pconsist_w * pcons
+            dual_metrics["dual/p_consistency"] = pcons.item()
+            if self.couple_w > 0:
+                cpl = dl.couple(d, p)
+                loss = loss + self.couple_w * cpl
+                dual_metrics["dual/couple"] = cpl.item()
+
+        self.model_opt.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 100.0)
+        self.model_opt.step()
+        self.ema.update(self.encoder)
+        self.step += 1
+        if _math.isfinite(pen_val):
+            self.pen_ema = (pen_val if self.pen_ema is None
+                            else self.ah_decay * self.pen_ema + (1 - self.ah_decay) * pen_val)
+            self.pen_peak = max(self.pen_peak, self.pen_ema)
+
+        out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss.item(),
+               "penalty/value": pen_val, "penalty/lambda": lam_t,
+               "loss/total": loss.item(), "step": self.step,
+               "latent/z_std": z.detach().std(0).mean().item(),
+               **op_metrics, **dual_metrics}
+        if vae_metrics is not None:
+            out |= vae_metrics
+        return out
+
+    def _behaviour_update_dual(self, z0: torch.Tensor, tau0=None) -> dict:
+        """Imagine in the POLICY latent p (shared: roll backbone z, read p=P(z);
+        twin: roll p with op_p), score reward/value on p, train via Dreamer
+        λ-returns (R10: the actor is never curvature-penalized)."""
+        cfg_i = self.cfg.imagination
+        gamma, lam_ret = cfg_i.gamma, cfg_i.get("lambda_", 0.95)
+        H = self._imagination_horizon()
+        ent_coef = cfg_i.get("entropy_coef", 3e-4)
+        dl = self.dual
+        z = z0
+        p = dl.p_of(z0)
+        ps, rs, logps = [p], [], []
+        for _ in range(H):
+            a, logp = self.policy.sample(p, tau0)
+            if dl.mode == "shared":
+                z = dl.op(z, a)
+                p = dl.p_of(z)
+            else:
+                p = dl.op_p(p, a)
+            ps.append(p)
+            r_im, _ = self._imagined_reward(ps[-2], a, tau0)
+            rs.append(r_im)
+            logps.append(logp)
+        ps = torch.stack(ps)                          # (H+1, B, p_dim)
+        rs = smooth_rewards(torch.stack(rs), self.cfg.smoothing)   # (H, B)
+        logps = torch.stack(logps)                    # (H, B)
+
+        with torch.no_grad():
+            flat = ps.reshape(-1, ps.shape[-1])
+            tgt_tau = tau0.repeat(H + 1, 1) if tau0 is not None else None
+            v_tgt = self.value_target(flat, tgt_tau).reshape(H + 1, -1)
+        if str(cfg_i.get("advantage", "lambda")) == "gae":
+            adv, returns = gae_advantages(rs, v_tgt, gamma, lam_ret)
+        else:
+            returns, adv = lambda_returns(rs, v_tgt, gamma, lam_ret), None
+
+        with torch.no_grad():
+            lo = torch.quantile(returns.detach().float(), 0.05)
+            hi = torch.quantile(returns.detach().float(), 0.95)
+            span = float(hi - lo)
+            if np.isfinite(span):
+                self.ret_scale = cfg_i.get("ret_scale_decay", 0.99) * self.ret_scale \
+                    + (1 - cfg_i.get("ret_scale_decay", 0.99)) * span
+        norm = max(1.0, self.ret_scale)
+
+        entropy = -logps.mean()
+        pi_signal = adv if adv is not None else returns
+        pi_loss = -(pi_signal / norm).mean() - ent_coef * entropy
+        align_val = 0.0
+        if self.align_weight > 0.0:                   # 2507.16450 stabilizer, in p-space
+            with torch.no_grad():
+                real_mu, real_sd = ps[0].mean(0), ps[0].std(0)
+            imag = ps[1:].reshape(-1, ps.shape[-1])
+            align = ((imag.mean(0) - real_mu).pow(2).mean()
+                     + (imag.std(0) - real_sd).pow(2).mean())
+            pi_loss = pi_loss + self.align_weight * align
+            align_val = align.item()
+        self.policy_opt.zero_grad(set_to_none=True)
+        pi_loss.backward()
+        gnorm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.actor_clip)
+        self.policy_opt.step()
+
+        flat = ps[:-1].detach().reshape(-1, ps.shape[-1])
+        v_tau = tau0.repeat(H, 1) if tau0 is not None else None
+        v = self.value(flat, v_tau).reshape(H, -1)
+        v_loss = F.mse_loss(v, returns.detach())
+        self.value_opt.zero_grad(set_to_none=True)
+        v_loss.backward()
+        self.value_opt.step()
+        decay = cfg_i.get("value_target_decay", 0.98)
+        with torch.no_grad():
+            for pt, pp in zip(self.value_target.parameters(), self.value.parameters()):
+                pt.lerp_(pp, 1.0 - decay)
+
+        return {"loss/value": v_loss.item(), "loss/policy": pi_loss.item(),
+                "policy/entropy": entropy.item(), "policy/ret_scale": self.ret_scale,
+                "imagine/horizon": H, "imagine/return_mean": returns.mean().item(),
+                "imagine/return_var": returns.var().item(),
+                "imagine/align": align_val, "actor/grad_norm": float(gnorm)}
+
     @torch.no_grad()
     def act(self, z: torch.Tensor, tau: torch.Tensor | None = None) -> torch.Tensor:
         """Execution action selection (B, act): the planner's receding-horizon
@@ -893,6 +1135,8 @@ class Trainer:
         (collection, eval) uses, so the actor swap is invisible to train.py."""
         if self.use_planner:
             return self.planner.act(z, tau)
+        if self.dual_latent:                          # policy reads the policy latent p
+            return self.policy.sample(self.dual.p_of(z), tau)[0]
         return self.policy.sample(z, tau)[0]
 
     @torch.no_grad()
@@ -917,6 +1161,7 @@ class Trainer:
                 "value_opt": self.value_opt.state_dict(), "step": self.step,
                 "ret_scale": self.ret_scale,
                 **({"planner": self.planner.state_dict()} if self.use_planner else {}),
+                **({"dual": self.dual.state_dict()} if self.dual_latent else {}),
                 # data-driven symexp clamp bound (bitwise resume)
                 "symlog_bound": self.symlog_bound,
                 # auto-dose: computed lam0 + warmup accumulators (bitwise resume)
@@ -953,6 +1198,8 @@ class Trainer:
         self.policy.load_state_dict(sd["policy"]); self.value.load_state_dict(sd["value"])
         if self.use_planner and "planner" in sd:
             self.planner.load_state_dict(sd["planner"])
+        if self.dual_latent and "dual" in sd:
+            self.dual.load_state_dict(sd["dual"])
         if "value_target" in sd:
             self.value_target.load_state_dict(sd["value_target"])
         self.model_opt.load_state_dict(sd["model_opt"])

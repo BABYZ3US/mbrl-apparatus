@@ -22,7 +22,32 @@ model:
                         # transitions p(z'|z,a) = N(mu, diag(sigma^2)); mean
                         # stays affine in action so R15's zero action-curvature
                         # is preserved; variance head is state-only; imagination
-                        # rolls out rsamples with gradient flow)
+                        # rolls out rsamples with gradient flow) | operator
+                        # (z'=A(z)z+B(z)a, the dual-latent controlled-operator
+                        # model; A=I+Â near-identity, still affine-in-a so R15
+                        # holds; see model.operator below)
+  operator:             # only used when model.dynamics=operator. A(z) is a
+                        # learned matrix FIELD; these keep it a coherent operator
+                        # bundle, not an unconstrained hypernetwork in disguise.
+    structure: none     # none | symmetric (A := (A+Aᵀ)/2: real spectrum, no rotations)
+    rank: 0             # 0 = full A(z); r>0 = low-rank A = U(z)V(z)ᵀ + I (≤r modes)
+    w_normal: 0.0       # ‖AAᵀ−AᵀA‖²: 0 ⇔ A normal (clean spectral decomp, keeps rotations)
+    w_smooth: 0.0       # ‖A(zᵢ)−A(zⱼ)‖²/‖zᵢ−zⱼ‖²: slowly-varying operator field (a connection)
+    w_spread: 0.0       # −entropy(σ): maximize effective rank / several balanced modes
+                        #              (anti mode-collapse; NOT −Var, which favors 1 dominant mode)
+    w_radius: 0.0       # relu(σ_max−1)²: soft spectral-radius bound (near-marginal stability)
+  dual_latent:          # dual-latent controlled-operator model (needs dynamics=operator;
+                        # incompatible with spectral/ensemble). Shared encoder z splits
+                        # into dynamics latent d=D(z) and policy latent p=P(z); reward/
+                        # policy/value read p. Resolves the one-representation tension.
+    enabled: false
+    mode: shared        # shared = ONE operator on z, d&p are readouts (option 1)
+                        # twin   = TWO operators (op_d rolls d, op_p rolls p) (option 3)
+    d_dim: 0            # 0 = latent_dim
+    p_dim: 0            # 0 = latent_dim
+    couple_weight: 0.0  # twin: weak L_couple = ‖W_d d − W_p p‖² (ties the two geometries)
+    couple_dim: 0       # 0 = min(d_dim, p_dim)
+    p_consistency_weight: 1.0   # twin: ‖op_p(p,a) − P(z')‖² grounds the policy operator
   latent_dim: 4         # capped at 4x obs_dim (user rule v2: wider latent ->
                         # more null nodes / longer tails; e.g. 12 on Pendulum)
   hidden: 256
