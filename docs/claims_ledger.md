@@ -335,7 +335,30 @@ cell ran): svd_shrink ships iff it beats champion in a MAJORITY of the 20
 cells, mean relative test-MSE > +2%, worst cell > −20%. FALSIFIER: bar not
 cleared ⇒ NOT SUPPORTED; the corrected candidate B is closed (4th
 orthonormal-frame instance: runs 4, 6/8, 12, 12B) and cycle 2 moves to
-leverage-score feature sampling. RESULTS: pending.
+leverage-score feature sampling.
+
+**RESULTS (2026-06-14, results/bridge/c1b9144/): NOT SUPPORTED — and the DJ
+shrinkage was never selected.** svd_shrink vs champion over 20 cells: wins
+6/20, mean −69.4%, worst cell −945% — fails all three bars. The informative
+twist: **kappa=0 (pure Tikhonov spectral filter, NO shrinkage) was the
+validation pick in all 20/20 cells** — the DJ universal threshold (kappa=1)
+and the conservative variant (kappa=2) never beat plain ridge on validation,
+so the actual cycle-2 ingredient (orthonormal-basis shrinkage) contributed
+nothing here. Diagnosis: smooth/resonant rewards are NOT sparse in the Φ-SVD
+basis (energy spread across many singular directions), so soft-thresholding β
+removes signal; the orthonormal frame fixes the *ringing* failure of
+`shrink_coefs` (test pins it, ×3000 → bounded) but sparsity, the property DJ
+needs, is absent. The arm therefore reduces to scalar Tikhonov ridge in the
+SVD basis, which loses to the hand-tuned poly-band recipe exactly where the
+recipe is strong: per-target — smooth 0/10, mean −140% (champion dominates);
+resonant 6/10, mean +1.0%, and resonant n=2048 a clean 5/5, mean +10.8%
+(worst +3%) — i.e. plain spectral filtering only ties/edges the recipe in the
+data-rich resonant regime, never on smooth or scarce-data cells. Per the
+pre-registered falsifier the corrected candidate B is CLOSED (4th
+orthonormal-frame instance). Upshot, consistent with runs 6/8: the linear
+multi-scale frame + the validated poly recipe is sufficient; principled
+spectral filtering does not pay against it. Cycle 2 now moves to leverage-
+score feature sampling (Bach 2017 line).
 
 **Runs 10–11 (2026-06-08, PRE-REGISTERED — the VAE/transformer generation,
 user-proposed).**
