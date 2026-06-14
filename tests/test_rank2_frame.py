@@ -75,6 +75,15 @@ def test_spectral_shell_two_sided_anti_collapse():
     assert spectral_shell_penalty(z_good * 0.05, 2, 1.0).item() > good  # norm collapse -> penalized
 
 
+def test_shell_floor_holds_tail_off_zero():
+    """floor>0 targets the tail eigenvalues at `floor` instead of 0 — a tail sitting at ~0
+    is then penalized for being BELOW the floor (keeps the spectrum off singular)."""
+    g = torch.Generator().manual_seed(0)
+    z2 = torch.randn(2048, 2, generator=g) @ torch.eye(2, 6)   # rank-2, tail ~0
+    assert spectral_shell_penalty(z2, 2, 1.0, floor=0.05).item() > \
+           spectral_shell_penalty(z2, 2, 1.0, floor=0.0).item()
+
+
 def test_shell_wires_into_model_update():
     seed_everything(0)
     cfg = _cfg(energy_mode="lyapunov")

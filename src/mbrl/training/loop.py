@@ -169,6 +169,7 @@ class Trainer:
             self.frame_target_rank = int(_rf.get("target_rank", 2))
             self.frame_w_shell = float(_rf.get("w_shell", 0.0) or 0.0)   # cf10 two-sided shell
             self.frame_shell_target = float(_rf.get("shell_target", 1.0))
+            self.frame_shell_floor = float(_rf.get("shell_floor", 0.0))  # tail floor (cond bound)
             self.frame_w_logdet = float(_rf.get("w_logdet", 0.0) or 0.0)  # cf12 KL/log-det cond barrier
             self.frame_logdet_eps = float(_rf.get("logdet_eps", 1e-2))
             if self.frame_enabled and self.frame_energy_mode == "contractive" \
@@ -638,7 +639,8 @@ class Trainer:
         # cf10 two-sided rank-k energy shell (Ginzburg-Landau well): hold the top-k Gram
         # eigenvalues at the setpoint and push the rest to 0 — anti-collapse in EVERY mode
         if self.frame_w_shell > 0.0:
-            shell = spectral_shell_penalty(z, self.frame_target_rank, self.frame_shell_target)
+            shell = spectral_shell_penalty(z, self.frame_target_rank, self.frame_shell_target,
+                                           self.frame_shell_floor)
             term = term + self.frame_w_shell * shell
             metrics["frame/shell"] = float(shell.detach())
         # cf12 log-det / KL volume barrier: push eigenvalues off zero -> bound cond(G)

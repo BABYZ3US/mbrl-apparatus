@@ -102,6 +102,10 @@ model:
                         # explode. Replaces the dissipativity (which only saw growth) and
                         # the one-sided rank2_tail (which permitted rank-1). 0 = off.
       shell_target: 1.0 # the per-mode eigenvalue setpoint the shell holds the top-k at.
+      shell_floor: 0.0  # cf13 (PM 2026-06-14): hold the TAIL eigenvalues at this floor
+                        # instead of 0 (the 'leave ~1% in the tail' / shell-to-0.99 idea)
+                        # — keeps the spectrum off singular so cond(G)≈shell_target/floor
+                        # is bounded. Simpler twin of w_logdet. 0 = pure rank-k.
       w_logdet: 0.0     # cf12 (PM 2026-06-14): log-det / KL volume barrier −mean ln(λ_i+eps)
                         # on the Gram — the spectrum term of KL(N(0,Σ)‖N(0,I)). Pushes every
                         # eigenvalue OFF zero -> bounds cond(G)=λ_max/λ_min (which the rank-2

@@ -81,7 +81,8 @@ def rank2_tail_penalty(z: Tensor, target_rank: int = 2) -> Tensor:
     return ev[:-target_rank].clamp_min(0.0).sum()        # all but the top-`target_rank`
 
 
-def spectral_shell_penalty(z: Tensor, target_rank: int = 2, target: float = 1.0) -> Tensor:
+def spectral_shell_penalty(z: Tensor, target_rank: int = 2, target: float = 1.0,
+                           floor: float = 0.0) -> Tensor:
     """Two-sided rank-k energy shell (PM 2026-06-14) — the Ginzburg–Landau double-well
     for the representation's Gram spectrum:
 
@@ -100,7 +101,9 @@ def spectral_shell_penalty(z: Tensor, target_rank: int = 2, target: float = 1.0)
     k = min(int(target_rank), ev.shape[-1])
     shell = ((target - ev[-k:]) ** 2).sum()                  # top-k held at `target`
     if ev.shape[-1] > k:
-        shell = shell + (ev[:-k] ** 2).sum()                 # rest pushed to 0
+        # tail held at `floor` (0 = pure rank-k; floor>0 = the 'leave ~1% in the tail' /
+        # shell-to-0.99 idea — keeps the tail off zero so cond ≈ target/floor is bounded)
+        shell = shell + ((ev[:-k] - floor) ** 2).sum()
     return shell
 
 
