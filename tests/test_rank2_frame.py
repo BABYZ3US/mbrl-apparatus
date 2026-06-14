@@ -89,13 +89,16 @@ def test_energy_head_grounding_runs():
 
 
 def test_energy_anchor_prevents_constant_collapse():
-    """cf7-fix: the ½‖d‖² anchor ties E to the latent norm, so a constant head can no
-    longer zero the energy differences (the cause of dissip/lyap collapsing to 0)."""
+    """cf7-fix: with the anchor, E = a·½‖d‖² + tanh(head). The tanh correction is bounded
+    (∈(−1,1)) so it CANNOT cancel the kinetic floor — E provably grows with ‖d‖ no matter
+    what the head does, foreclosing collapse to a constant."""
     seed_everything(0)
-    e0 = EnergyHead(4, 16, 1, anchor=0.0)
     e1 = EnergyHead(4, 16, 1, anchor=1.0)
     d = torch.randn(8, 4); big = d * 5.0
-    assert (e1(big) - e1(d)).abs().mean() > (e0(big) - e0(d)).abs().mean()
+    dn = 0.5 * (d * d).sum(-1); bn = 0.5 * (big * big).sum(-1)
+    gap = e1(big) - e1(d)
+    # floor dominates: gap >= anchor*(bn-dn) - 2 (tanh shifts each end by < 1), still > 0
+    assert (gap >= 1.0 * (bn - dn) - 2.0 - 1e-4).all() and gap.mean() > 0
     cfg = _cfg(energy_mode="lyapunov")
     cfg.model.dual_latent.rank2_frame.energy_anchor = 1.0
     t = Trainer(cfg, obs_dim=3, action_dim=2)
