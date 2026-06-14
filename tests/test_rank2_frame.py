@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from mbrl.models.dynamics import OperatorDynamics
 from mbrl.regularization.rank2_frame import (EnergyHead, axis_cos2, rank2_tail_penalty,
                                              lyapunov_grounding, contractive_axis_in_d,
-                                             dissipativity_penalty)
+                                             dissipativity_penalty, spectral_shell_penalty)
 from mbrl.training import Trainer
 from mbrl.utils.checkpoint import CheckpointManager
 from mbrl.utils.seeding import seed_everything
@@ -60,6 +60,28 @@ def test_rank2_tail_penalty_targets_rank2():
     # full-rank isotropic -> tail > 0 (variance outside the top 2)
     z6 = torch.randn(256, 6, generator=g)
     assert rank2_tail_penalty(z6).item() > 0.1
+
+
+def test_spectral_shell_two_sided_anti_collapse():
+    """The Landau well penalizes rank-1 collapse AND norm collapse, near-zero for a
+    healthy rank-2-at-setpoint spectrum."""
+    g = torch.Generator().manual_seed(0)
+    z_good = torch.randn(2048, 2, generator=g) @ torch.eye(2, 6)   # 2 unit-var modes
+    good = spectral_shell_penalty(z_good, 2, 1.0).item()
+    assert good < 0.3
+    z_rank1 = torch.randn(2048, 1, generator=g) @ torch.randn(1, 6, generator=g)
+    assert spectral_shell_penalty(z_rank1, 2, 1.0).item() > 1.0     # 2nd mode missing -> penalized
+    assert spectral_shell_penalty(z_good * 0.05, 2, 1.0).item() > good  # norm collapse -> penalized
+
+
+def test_shell_wires_into_model_update():
+    seed_everything(0)
+    cfg = _cfg(energy_mode="lyapunov")
+    cfg.model.dual_latent.rank2_frame.w_shell = 0.5
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    m = t.model_update(_batch())
+    assert "frame/shell" in m and math.isfinite(m["frame/shell"])
+    assert math.isfinite(m["loss/total"])
 
 
 def test_axis_cos2_orthogonal_vs_parallel():

@@ -167,6 +167,8 @@ class Trainer:
             self.frame_balance_decay = float(_rf.get("balance_decay", 0.99))
             self.frame_subsample = int(_rf.get("subsample", 64))
             self.frame_target_rank = int(_rf.get("target_rank", 2))
+            self.frame_w_shell = float(_rf.get("w_shell", 0.0) or 0.0)   # cf10 two-sided shell
+            self.frame_shell_target = float(_rf.get("shell_target", 1.0))
             if self.frame_enabled and self.frame_energy_mode == "contractive" \
                     and self.dual.mode != "twin":
                 raise ValueError("rank2_frame.energy_mode=contractive needs "
@@ -603,7 +605,8 @@ class Trainer:
         (∇_z R) and energy-descent (−∇_z E, lyapunov | op_d's contractive mode). z must
         carry grad (it is the live encoder output). Returns (loss_term, metrics)."""
         from ..regularization.rank2_frame import (axis_cos2, rank2_tail_penalty,
-                                                   lyapunov_grounding, contractive_axis_in_d)
+                                                   lyapunov_grounding, contractive_axis_in_d,
+                                                   spectral_shell_penalty)
         dl = self.dual
         metrics = {}
         term = z.new_zeros(())
@@ -630,6 +633,12 @@ class Trainer:
             tail = rank2_tail_penalty(z, self.frame_target_rank)
             term = term + self.frame_w_rank2 * tail
             metrics["frame/rank2_tail"] = float(tail.detach())
+        # cf10 two-sided rank-k energy shell (Ginzburg-Landau well): hold the top-k Gram
+        # eigenvalues at the setpoint and push the rest to 0 — anti-collapse in EVERY mode
+        if self.frame_w_shell > 0.0:
+            shell = spectral_shell_penalty(z, self.frame_target_rank, self.frame_shell_target)
+            term = term + self.frame_w_shell * shell
+            metrics["frame/shell"] = float(shell.detach())
         # lyapunov grounding: the autonomous drift must descend E
         if (self.frame_energy_mode == "lyapunov" and self.energy is not None
                 and self.frame_w_lyap > 0.0):

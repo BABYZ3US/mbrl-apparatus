@@ -94,6 +94,14 @@ model:
                         # reward with a warning if set to an unwired mode.
       subsample: 64     # batch rows used for the orthogonality double-backward (cost cap).
       target_rank: 2    # the target effective rank of the representation.
+      w_shell: 0.0      # cf10 (PM 2026-06-14): TWO-SIDED rank-k energy shell, the
+                        # Ginzburg-Landau double-well on the Gram spectrum —
+                        # Σ_{i<=k}(shell_target−λ_i)² + Σ_{i>k}λ_i². Holds the top-k
+                        # eigenvalues at the setpoint (anti-collapse) and pushes the rest
+                        # to 0 (rank-k). Two-sided in every mode ⇒ can't fall to rank-1 or
+                        # explode. Replaces the dissipativity (which only saw growth) and
+                        # the one-sided rank2_tail (which permitted rank-1). 0 = off.
+      shell_target: 1.0 # the per-mode eigenvalue setpoint the shell holds the top-k at.
       balance: false    # cf7 (PM 2026-06-14): equilibrium-couple the alignment (couple)
                         # and energy (dissipativity) penalties — normalize each by its
                         # running magnitude before summing so neither outweighs the other

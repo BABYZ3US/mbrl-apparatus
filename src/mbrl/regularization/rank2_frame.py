@@ -81,6 +81,29 @@ def rank2_tail_penalty(z: Tensor, target_rank: int = 2) -> Tensor:
     return ev[:-target_rank].clamp_min(0.0).sum()        # all but the top-`target_rank`
 
 
+def spectral_shell_penalty(z: Tensor, target_rank: int = 2, target: float = 1.0) -> Tensor:
+    """Two-sided rank-k energy shell (PM 2026-06-14) — the Ginzburg–Landau double-well
+    for the representation's Gram spectrum:
+
+        shell = Σ_{i≤k} (target − λ_i)²  +  Σ_{i>k} λ_i²
+
+    Keep the top-`target_rank` covariance eigenvalues pinned at `target` (the active
+    modes — penalized for collapsing to 0 AND for blowing up) and push the rest to 0
+    (rank-k). Unlike the one-sided rank2_tail (which permitted rank-1 collapse — only
+    pushed the tail down, never held the top up), this is two-sided in EVERY mode, so the
+    spectrum can fall to neither rank-1 nor explode. Operates on the Gram directly — no
+    learned energy head to go vacuous. For target_rank=1 it is the (target−‖ψ‖²)²
+    double-well; here it is the rank-2 shell. eigvalsh has a stable backward."""
+    zc = z - z.mean(0, keepdim=True)
+    cov = (zc.transpose(-1, -2) @ zc) / max(zc.shape[0], 1)
+    ev = torch.linalg.eigvalsh(cov.float()).clamp_min(0.0)   # ascending eigenvalues
+    k = min(int(target_rank), ev.shape[-1])
+    shell = ((target - ev[-k:]) ** 2).sum()                  # top-k held at `target`
+    if ev.shape[-1] > k:
+        shell = shell + (ev[:-k] ** 2).sum()                 # rest pushed to 0
+    return shell
+
+
 def lyapunov_grounding(energy: EnergyHead, op_d, d: Tensor, action_dim: int) -> Tensor:
     """Ground E as an energy of the dynamics: the AUTONOMOUS (zero-action) drift must
     not increase it. relu(E(d_auto) − E(d)) → 0, with d_auto detached so the grounding
