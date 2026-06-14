@@ -1195,9 +1195,18 @@ class Trainer:
         z = (self.ret_ema - self.rg_mid) / max(self.rg_scale, 1e-6)
         if self.rg_shape == "sigmoid":
             relax = 1.0 - 1.0 / (1.0 + _m.exp(-max(min(z, 60.0), -60.0)))   # 1-σ
-        else:                                                   # quadratic (default)
-            frac = max(min(z, 1.0), 0.0)        # positive distance above mid, clipped
-            relax = 1.0 - frac * frac           # 1 at/below mid, 0 at mid+scale (parabola)
+        else:
+            # FULL-RANGE power gate over the band [mid-scale, mid+scale]:
+            # relax = 1 - frac^p, frac = (clip(z,-1,1)+1)/2 ∈ [0,1]. lambda varies
+            # smoothly with return on BOTH sides of mid (gate=1 below mid-scale,
+            # floor above mid+scale). The exponent p is the GATE CURVATURE:
+            #   quadratic (p=2):  convex — holds lambda high, relaxes late.
+            #   cuberoot  (p=1/3): concave — relaxes lambda fast, then flattens.
+            # The axis that tests whether the gate's curvature/degree matters (PM).
+            u = max(min(z, 1.0), -1.0)
+            frac = (u + 1.0) / 2.0
+            p = (1.0 / 3.0) if self.rg_shape == "cuberoot" else 2.0
+            relax = 1.0 - frac ** p
         target = self.rg_floor + (1.0 - self.rg_floor) * relax
         lo, hi = self.rg_gate_now - self.rg_slew, self.rg_gate_now + self.rg_slew
         self.rg_gate_now = min(max(target, lo), hi)             # slew-rate limited

@@ -64,24 +64,49 @@ def test_sigmoid_smooth_signaware_no_spike_near_zero():
     assert t.rg_gate_now > 0.99                 # -> ~1
 
 
-def test_quadratic_signaware_smooth_slope():
-    """quadratic shape (default): gate held FULL through negative/zero return,
-    relaxes along a parabola for positive return, floor at mid+scale. Smooth,
-    monotone, never below floor."""
+def test_quadratic_fullrange_smooth_slope():
+    """quadratic (default): a FULL-RANGE parabola — λ varies smoothly across the
+    whole band [mid-scale, mid+scale], on BOTH sides of mid (not flat for negative
+    return). gate=1 at/below mid-scale, floor at/above mid+scale, 0.875 at mid."""
     seed_everything(0)
     def gate_at(r):
         t = Trainer(_cfg(floor=0.5, decay=0.0, mid=0.0, scale=100.0, slew=1.0,
                          shape="quadratic"), obs_dim=3, action_dim=2)
         t.observe_return(r); return t.rg_gate_now
-    assert gate_at(-500.0) == 1.0 and gate_at(0.0) == 1.0     # full λ through ≤ mid
-    assert abs(gate_at(50.0) - 0.875) < 1e-6                  # parabola: 0.5+0.5*(1-.25)
+    assert gate_at(-500.0) == 1.0                             # full λ below mid-scale
+    assert abs(gate_at(0.0) - 0.875) < 1e-6                   # at mid: 0.5+0.5*0.75
     assert abs(gate_at(100.0) - 0.5) < 1e-6                   # floor at mid+scale
     assert abs(gate_at(5000.0) - 0.5) < 1e-6                  # clipped to floor
+    # the KEY fix: the gate VARIES in the negative regime (not flat at 1)
+    assert 0.875 < gate_at(-50.0) < 1.0
     # monotone non-increasing as return climbs, bounded [floor,1]
     prev = 1.01
-    for r in (-100.0, 0.0, 25.0, 50.0, 75.0, 100.0, 200.0):
+    for r in (-200.0, -50.0, 0.0, 50.0, 100.0, 300.0):
         g = gate_at(r)
         assert 0.5 - 1e-9 <= g <= 1.0 + 1e-9 and g <= prev + 1e-9
+        prev = g
+
+
+def test_cuberoot_vs_quadratic_curvature():
+    """cuberoot gate (p=1/3) is CONCAVE — relaxes λ faster than the quadratic
+    (p=2, convex) for the same return. Both full-range, both monotone, bounded.
+    This is the gate-curvature axis."""
+    seed_everything(0)
+    def gate(r, shape):
+        t = Trainer(_cfg(floor=0.1, decay=0.0, mid=0.0, scale=400.0, slew=1.0,
+                         shape=shape), obs_dim=3, action_dim=2)
+        t.observe_return(r); return t.rg_gate_now
+    # endpoints agree; curvature differs in between
+    assert abs(gate(-400.0, "cuberoot") - 1.0) < 1e-6 and abs(gate(-400.0, "quadratic") - 1.0) < 1e-6
+    assert abs(gate(400.0, "cuberoot") - 0.1) < 1e-6 and abs(gate(400.0, "quadratic") - 0.1) < 1e-6
+    # at mid and above, cuberoot has ALREADY relaxed λ far more than quadratic
+    for r in (0.0, 100.0, 200.0):
+        assert gate(r, "cuberoot") < gate(r, "quadratic") - 0.1
+    # cuberoot bounded + monotone too
+    prev = 1.01
+    for r in (-400.0, -100.0, 0.0, 100.0, 400.0):
+        g = gate(r, "cuberoot")
+        assert 0.1 - 1e-9 <= g <= 1.0 + 1e-9 and g <= prev + 1e-9
         prev = g
 
 

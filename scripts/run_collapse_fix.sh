@@ -10,10 +10,13 @@
 #     — pulls imagined latents to the encoder manifold to HOLD the gait.
 #
 # Matrix: TWIN + DreamSmooth OFF + align=1.0 + best-ckpt, 2 seeds x
-#   lambda {1e-3, 5e-4, 1e-4} x  gate {coff = cuberoot only, gquad = + quadratic gate}
-# = 12 runs @ 500k HalfCheetah. The quadratic gate (shape=quadratic, scale=300 ≈ the
-# twin's good-return level) relaxes λ as return climbs; coff is the cuberoot time-
-# decay alone. Judge by PEAK *and* by FINAL/peak ratio (did the collapse shrink?).
+#   lambda {1e-3, 5e-4, 1e-4} x  GATE-CURVATURE {gquad = quadratic (p=2, convex),
+#                                                 gcube = cuberoot (p=1/3, concave)}
+# = 12 runs @ 500k HalfCheetah. BOTH gates are full-range reward-tied (enabled,
+# mid=0, scale=400 ≈ the twin's return span) — they relax λ as return climbs but
+# with OPPOSITE curvature (quad holds λ high then drops late; cuberoot drops λ fast
+# then flattens). Tests whether the gate's curvature/degree matters. The cuberoot
+# TIME-DECAY schedule stays on underneath both. Judge by PEAK and FINAL/peak ratio.
 #
 # Usage: bash scripts/run_collapse_fix.sh   (STEPS/JOBS/NGPU/SEEDS/LAMS/GATES tunable)
 set -uo pipefail
@@ -25,7 +28,7 @@ JOBS="${JOBS:-$((2 * NGPU))}"
 STEPS="${STEPS:-500000}"
 SEEDS="${SEEDS:-0 1}"
 LAMS="${LAMS:-1e-3 5e-4 1e-4}"
-GATES="${GATES:-coff gquad}"
+GATES="${GATES:-gquad gcube}"
 PY=".venv/bin/python"
 mkdir -p results/gridlogs
 if [ -z "${WANDB_API_KEY:-}" ] && [ -f .wandb_key ]; then
@@ -41,11 +44,11 @@ env=halfcheetah training.total_env_steps=${STEPS} logging.video.enabled=false \
 penalty.auto_dose.enabled=false penalty.schedule.kind=cuberoot smoothing.enabled=false \
 imagination.align_weight=1.0"
 
-gate_cfg() {   # $1 = coff | gquad
+GATE_ON="penalty.return_gate.enabled=true penalty.return_gate.mid=0.0 penalty.return_gate.scale=400.0"
+gate_cfg() {   # $1 = gquad | gcube  (both full-range reward-tied gates; opposite curvature)
 	case "$1" in
-		coff)  echo "penalty.return_gate.enabled=false" ;;
-		gquad) echo "penalty.return_gate.enabled=true penalty.return_gate.shape=quadratic \
-penalty.return_gate.mid=0.0 penalty.return_gate.scale=300.0" ;;
+		gquad) echo "$GATE_ON penalty.return_gate.shape=quadratic" ;;
+		gcube) echo "$GATE_ON penalty.return_gate.shape=cuberoot" ;;
 	esac
 }
 lam_tag() { echo "$1" | sed 's/e-/em/; s/\.//g'; }   # 1e-3->1em3, 5e-4->5em4

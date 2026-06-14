@@ -87,10 +87,11 @@ penalty:
     decay: 0.99         # disagreement EMA decay (same family as adaptive horizon)
   return_gate:          # RETURN-paced lambda (PM 2026-06-13): weakly tie lam(t) to
                         # ACTUAL eval return. ABSOLUTE + SIGN-AWARE + SMOOTH.
-                        # shape=quadratic (default): gate = floor + (1-floor)*(1-frac²),
-                        # frac = clip((R̄-mid)/scale, 0, 1) — λ held full through
-                        # negative/zero return, relaxed along a parabola for positive
-                        # return (a smooth slope to follow, no sigmoid saturation).
+                        # shape=quadratic (default): FULL-RANGE parabola over the band
+                        # [mid-scale, mid+scale] — gate = floor + (1-floor)*(1-frac²),
+                        # frac = ((clip((R̄-mid)/scale,-1,1))+1)/2 — λ varies smoothly
+                        # with return on BOTH sides of mid (a continuous slope to
+                        # follow; 1 below mid-scale, floor above mid+scale, 0.875 at mid).
                         # shape=sigmoid: gate = floor + (1-floor)*(1 - σ((R̄-mid)/scale)).
                         # genuinely-positive return (R̄≫mid) → gate→floor (relax lam);
                         # negative (R̄≪mid) → gate→1 (hold lam high); R̄≈mid → middle
@@ -104,7 +105,9 @@ penalty:
                         # to floor*schedule (here 10%); floor>0 ⇒ never zero (R14).
                         # 0.5 was too high (PM) — set lower still (0.05/0.02) if wanted.
     decay: 0.95         # return EMA decay (eval is sparse, so a slower EMA)
-    shape: quadratic    # quadratic (parabolic, smooth slope) | sigmoid
+    shape: quadratic    # gate curvature: quadratic (p=2, convex — holds λ high,
+                        # relaxes late) | cuberoot (p=1/3, concave — relaxes λ fast,
+                        # flattens) | sigmoid. Full-range power gate relax=1-frac^p.
     mid: 0.0            # return anchor: gate=full for R̄≤mid, relaxes for R̄>mid;
                         # 0 = the do-nothing boundary on HalfCheetah → distinguishes +/-
     scale: 100.0        # return units over which the gate relaxes mid→mid+scale (quadratic)
