@@ -147,6 +147,43 @@ def test_dissipativity_wires_into_model_update():
     assert math.isfinite(m["loss/total"])
 
 
+def test_equilibrium_balance_applies_both_penalties():
+    """cf7 balance: alignment (couple) and energy (dissipativity) are held at equal
+    influence via adaptive weights (the fixed couple_w/w_dissip are bypassed). The
+    bal_* metrics log, the per-side EMAs populate, loss stays finite."""
+    seed_everything(0)
+    cfg = _cfg(energy_mode="lyapunov")
+    cfg.model.dual_latent.rank2_frame.w_dissip = 0.1
+    cfg.model.dual_latent.rank2_frame.balance = True
+    cfg.model.dual_latent.rank2_frame.balance_weight = 0.1
+    cfg.model.dual_latent.rank2_frame.balance_decay = 0.9
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    assert t.frame_balance
+    m = t.model_update(_batch())
+    assert {"frame/bal_w_align", "frame/bal_w_energy",
+            "frame/bal_align", "frame/bal_energy"} <= set(m)
+    assert math.isfinite(m["loss/total"])
+    assert t._bal_ema_align is not None and t._bal_ema_energy is not None
+
+
+def test_resume_bitwise_with_balance(tmp_path):
+    cfg = _cfg(energy_mode="lyapunov")
+    cfg.model.dual_latent.rank2_frame.w_dissip = 0.1
+    cfg.model.dual_latent.rank2_frame.balance = True
+    seed_everything(0)
+    t1 = Trainer(cfg, obs_dim=3, action_dim=2)
+    for i in range(3):
+        t1.model_update(_batch(seed=i))
+    cm = CheckpointManager(tmp_path, OmegaConf.to_container(cfg), every=10)
+    cm.save(t1, env_steps=300, tag="step3")
+    seed_everything(0)
+    t2 = Trainer(cfg, obs_dim=3, action_dim=2)
+    cm2 = CheckpointManager(tmp_path, OmegaConf.to_container(cfg), every=10)
+    assert cm2.resume(t2) == 300
+    assert t2._bal_ema_align == t1._bal_ema_align
+    assert t2._bal_ema_energy == t1._bal_ema_energy
+
+
 def test_resume_bitwise_with_lyapunov_frame(tmp_path):
     cfg = _cfg(energy_mode="lyapunov")
     seed_everything(0)

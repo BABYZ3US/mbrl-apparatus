@@ -89,6 +89,14 @@ model:
                         # reward with a warning if set to an unwired mode.
       subsample: 64     # batch rows used for the orthogonality double-backward (cost cap).
       target_rank: 2    # the target effective rank of the representation.
+      balance: false    # cf7 (PM 2026-06-14): equilibrium-couple the alignment (couple)
+                        # and energy (dissipativity) penalties — normalize each by its
+                        # running magnitude before summing so neither outweighs the other
+                        # (the fixed couple_weight / w_dissip are then BYPASSED). The
+                        # equilibrium point is balanced gradient influence. Needs the
+                        # dissipativity (lyapunov energy + w_dissip path). Default off.
+      balance_weight: 0.1   # the common (normalized) strength each side is held at.
+      balance_decay: 0.99   # EMA decay for the per-side running magnitudes.
   latent_dim: 4         # capped at 4x obs_dim (user rule v2: wider latent ->
                         # more null nodes / longer tails; e.g. 12 on Pendulum)
   hidden: 256

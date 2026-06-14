@@ -112,6 +112,9 @@ class Trainer:
         self.dual = None
         self.energy = None          # cf5 lyapunov energy head (built below if enabled)
         self.frame_enabled = False  # cf5 rank-2 reward⊥energy frame (default off)
+        self.frame_balance = False  # cf7 equilibrium coupling of alignment vs energy
+        self._bal_ema_align = None  # running |couple| (checkpointed)
+        self._bal_ema_energy = None # running |dissip| (checkpointed)
         if self.dual_latent:
             if not self.dyn_operator:
                 raise ValueError("model.dual_latent requires model.dynamics=operator")
@@ -153,6 +156,14 @@ class Trainer:
             self.frame_w_lyap = float(_rf.get("w_lyap", 0.0) or 0.0)
             self.frame_w_dissip = float(_rf.get("w_dissip", 0.0) or 0.0)   # cf6 dissipativity
             self.frame_supply = str(_rf.get("supply", "reward"))
+            # cf7 (PM 2026-06-14): equilibrium coupling of the alignment (couple) and
+            # energy (dissipativity) penalties. ON ⇒ each is normalized by its running
+            # magnitude before summing, so neither outweighs the other (the fixed
+            # couple_weight / w_dissip are then ignored). The equilibrium point is
+            # balanced gradient influence. Needs the dissipativity (lyapunov + w_dissip).
+            self.frame_balance = bool(_rf.get("balance", False))
+            self.frame_balance_w = float(_rf.get("balance_weight", 0.1) or 0.1)
+            self.frame_balance_decay = float(_rf.get("balance_decay", 0.99))
             self.frame_subsample = int(_rf.get("subsample", 64))
             self.frame_target_rank = int(_rf.get("target_rank", 2))
             if self.frame_enabled and self.frame_energy_mode == "contractive" \
@@ -624,6 +635,24 @@ class Trainer:
             term = term + self.frame_w_lyap * ground
             metrics["frame/lyap_resid"] = float(ground.detach())
         return term, metrics
+
+    def _balance_align_energy(self, align, energy):
+        """cf7 equilibrium coupling: hold the alignment (couple) and energy
+        (dissipativity) penalties at EQUAL influence so neither outweighs the other.
+        Each is normalized by its running magnitude (EMA) then summed — the fixed
+        couple_weight/w_dissip are bypassed. Equilibrium point = balanced normalized
+        gradients. EMA state checkpointed (bitwise resume)."""
+        dec = self.frame_balance_decay
+        a_mag = float(align.detach().abs()); e_mag = float(energy.detach().abs())
+        self._bal_ema_align = (a_mag if self._bal_ema_align is None
+                               else dec * self._bal_ema_align + (1 - dec) * a_mag)
+        self._bal_ema_energy = (e_mag if self._bal_ema_energy is None
+                                else dec * self._bal_ema_energy + (1 - dec) * e_mag)
+        wa = self.frame_balance_w / (self._bal_ema_align + 1e-8)
+        we = self.frame_balance_w / (self._bal_ema_energy + 1e-8)
+        term = wa * align + we * energy
+        return term, {"frame/bal_w_align": wa, "frame/bal_w_energy": we,
+                      "frame/bal_align": a_mag, "frame/bal_energy": e_mag}
 
     # ---------------- model learning ----------------
     def model_update(self, batch) -> dict:
@@ -1204,13 +1233,15 @@ class Trainer:
 
         # twin: ground op_p (p-consistency) + weak coupling of the two geometries
         dual_metrics = {}
+        cpl = None
         if dl.mode == "twin":
             pcons = F.mse_loss(dl.op_p(p, a), p_next)
             loss = loss + self.pconsist_w * pcons
             dual_metrics["dual/p_consistency"] = pcons.item()
-            if self.couple_w > 0:
+            if self.couple_w > 0 or self.frame_balance:
                 cpl = dl.couple(d, p)
-                loss = loss + self.couple_w * cpl
+                if not self.frame_balance:   # cf7: balance bypasses the fixed weight
+                    loss = loss + self.couple_w * cpl
                 dual_metrics["dual/couple"] = cpl.item()
             with torch.no_grad():   # relative-phase drift: scale-free desync of the two
                 cd, cp = dl.Wd(d), dl.Wp(p)   # sectors (0 = phase-locked, →1 slipping out).
@@ -1219,14 +1250,22 @@ class Trainer:
                     ((cd - cp).norm(dim=-1) / denom).mean())
 
         frame_metrics = {}
+        dissip = None
         if self.frame_enabled:   # cf5 rank-2 reward⊥energy frame
             frame_term, frame_metrics = self._rank2_frame(z, d, p, a, tau)
             loss = loss + frame_term
-            if self.frame_w_dissip > 0.0 and self.energy is not None:   # cf6 dissipativity
+            if (self.frame_w_dissip > 0.0 or self.frame_balance) and self.energy is not None:
                 from ..regularization.rank2_frame import dissipativity_penalty
                 dissip = dissipativity_penalty(self.energy, d, self.dual.d_of(z_next_tgt), r)
-                loss = loss + self.frame_w_dissip * dissip
+                if not self.frame_balance:   # cf6 dissipativity (fixed weight)
+                    loss = loss + self.frame_w_dissip * dissip
                 frame_metrics["frame/dissip_resid"] = float(dissip.detach())
+        # cf7 equilibrium coupling: hold alignment (couple) and energy (dissipativity) at
+        # equal influence so neither outweighs the other (replaces their fixed weights)
+        if self.frame_balance and cpl is not None and dissip is not None:
+            bal_term, bal_m = self._balance_align_energy(cpl, dissip)
+            loss = loss + bal_term
+            frame_metrics |= bal_m
 
         self.model_opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -1465,6 +1504,8 @@ class Trainer:
                 "symlog_bound": self.symlog_bound,
                 # cf4 non-finite-grad skip counter (diagnostic; bitwise resume)
                 "nonfinite_skips": self._nonfinite_skips,
+                # cf7 equilibrium-balance running magnitudes (bitwise resume)
+                "bal_ema_align": self._bal_ema_align, "bal_ema_energy": self._bal_ema_energy,
                 # auto-dose: computed lam0 + warmup accumulators (bitwise resume)
                 "lam0_sched": self.lam.lam0, "lam0_auto": self.lam0_auto,
                 "ad_count": self.ad_count, "ad_fit_sum": self.ad_fit_sum,
@@ -1525,6 +1566,8 @@ class Trainer:
         self.ret_scale = sd.get("ret_scale", 1.0)
         self.symlog_bound = sd.get("symlog_bound", 1.0)
         self._nonfinite_skips = sd.get("nonfinite_skips", 0)
+        self._bal_ema_align = sd.get("bal_ema_align", None)
+        self._bal_ema_energy = sd.get("bal_ema_energy", None)
         if "lam0_sched" in sd:  # auto-dose may have rewritten the schedule's lam0
             self.lam.lam0 = sd["lam0_sched"]
         self.lam0_auto = sd.get("lam0_auto", None)
