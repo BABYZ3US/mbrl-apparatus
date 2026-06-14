@@ -176,6 +176,20 @@ class Trainer:
         # actor grad-clip — the transformer-stabilization study's levers.
         self.align_weight = float(cfg.imagination.get("align_weight", 0.0))
         self.actor_clip = float(cfg.optim.get("actor_clip", 100.0))
+        # Policy INERTIA (PM 2026-06-13): give the policy extra inertia relative to
+        # the (faster) operator — a two-timescale stabilizer against the collapse
+        # (the policy lunging at transient model errors). A slow EMA of the policy
+        # weights (mirrors value_target), used two ways: act/collect with the EMA
+        # (policy_ema_act = behaviour inertia) and/or anchor the live policy to it
+        # (policy_inertia*||θ-θ_ema||² = weight inertia / soft trust region). The
+        # policy is already 3x slower than the operator (1e-4 vs 3e-4); this widens
+        # it. Only for the MLP-policy actor (not the planner). Default OFF.
+        self.policy_ema_decay = float(cfg.optim.get("policy_ema_decay", 0.0))
+        self.policy_ema_act = bool(cfg.optim.get("policy_ema_act", False))
+        self.policy_inertia = float(cfg.optim.get("policy_inertia", 0.0))
+        self.policy_ema = None
+        if self.policy_ema_decay > 0.0 and not self.use_planner:
+            self.policy_ema = copy.deepcopy(self.policy).requires_grad_(False)
 
         self.lam = LambdaSchedule(**cfg.penalty.schedule)
         self.step = 0
@@ -943,6 +957,7 @@ class Trainer:
                      + (imag.std(0) - real_sd).pow(2).mean())
             pi_loss = pi_loss + self.align_weight * align
             align_val = align.item()
+        pi_loss = pi_loss + self._policy_inertia_term()    # weight inertia (off by default)
         self.policy_opt.zero_grad(set_to_none=True)
         pi_loss.backward()
         actor = self.planner if self.use_planner else self.policy
@@ -958,11 +973,12 @@ class Trainer:
         v_loss.backward()
         self.value_opt.step()
 
-        # --- EMA target value ---
+        # --- EMA target value + (optional) EMA policy ---
         decay = cfg_i.get("value_target_decay", 0.98)
         with torch.no_grad():
             for pt, p in zip(self.value_target.parameters(), self.value.parameters()):
                 pt.lerp_(p, 1.0 - decay)
+        self._update_policy_ema()
 
         return {"loss/value": v_loss.item(), "loss/policy": pi_loss.item(),
                 "policy/entropy": entropy.item(),
@@ -1149,6 +1165,7 @@ class Trainer:
                      + (imag.std(0) - real_sd).pow(2).mean())
             pi_loss = pi_loss + self.align_weight * align
             align_val = align.item()
+        pi_loss = pi_loss + self._policy_inertia_term()    # weight inertia (off by default)
         self.policy_opt.zero_grad(set_to_none=True)
         pi_loss.backward()
         gnorm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.actor_clip)
@@ -1165,12 +1182,32 @@ class Trainer:
         with torch.no_grad():
             for pt, pp in zip(self.value_target.parameters(), self.value.parameters()):
                 pt.lerp_(pp, 1.0 - decay)
+        self._update_policy_ema()
 
         return {"loss/value": v_loss.item(), "loss/policy": pi_loss.item(),
                 "policy/entropy": entropy.item(), "policy/ret_scale": self.ret_scale,
                 "imagine/horizon": H, "imagine/return_mean": returns.mean().item(),
                 "imagine/return_var": returns.var().item(),
                 "imagine/align": align_val, "actor/grad_norm": float(gnorm)}
+
+    def _policy_inertia_term(self):
+        """Soft trust-region anchor inertia*‖θ_π − θ_π^ema‖² (0.0 when off). Pulls
+        the live policy toward its slow EMA so it resists big jumps toward
+        exploiting transient model errors (two-timescale stabilizer)."""
+        if self.policy_inertia <= 0.0 or self.policy_ema is None:
+            return 0.0
+        return self.policy_inertia * sum(
+            (p - pe.detach()).pow(2).sum()
+            for p, pe in zip(self.policy.parameters(), self.policy_ema.parameters()))
+
+    def _update_policy_ema(self):
+        """Polyak-update the slow policy EMA (no-op when off). Deterministic — no
+        new RNG, so bitwise resume holds once policy_ema is checkpointed."""
+        if self.policy_ema is None:
+            return
+        with torch.no_grad():
+            for pe, p in zip(self.policy_ema.parameters(), self.policy.parameters()):
+                pe.lerp_(p, 1.0 - self.policy_ema_decay)
 
     def observe_return(self, ep_return: float) -> None:
         """Feed the latest ACTUAL eval return to the return-gate (penalty.return_gate).
@@ -1218,9 +1255,12 @@ class Trainer:
         (collection, eval) uses, so the actor swap is invisible to train.py."""
         if self.use_planner:
             return self.planner.act(z, tau)
+        # policy inertia: act/collect with the slow EMA policy when enabled
+        actor = (self.policy_ema if (self.policy_ema is not None and self.policy_ema_act)
+                 else self.policy)
         if self.dual_latent:                          # policy reads the policy latent p
-            return self.policy.sample(self.dual.p_of(z), tau)[0]
-        return self.policy.sample(z, tau)[0]
+            return actor.sample(self.dual.p_of(z), tau)[0]
+        return actor.sample(z, tau)[0]
 
     @torch.no_grad()
     def imagine(self, z0: torch.Tensor, horizon: int, tau0: torch.Tensor | None = None):
@@ -1239,6 +1279,8 @@ class Trainer:
                 "dynamics": self.dynamics.state_dict(), "reward": self.reward.state_dict(),
                 "policy": self.policy.state_dict(), "value": self.value.state_dict(),
                 "value_target": self.value_target.state_dict(),
+                **({"policy_ema": self.policy_ema.state_dict()}
+                   if self.policy_ema is not None else {}),
                 "model_opt": self.model_opt.state_dict(),
                 "policy_opt": self.policy_opt.state_dict(),
                 "value_opt": self.value_opt.state_dict(), "step": self.step,
@@ -1296,6 +1338,8 @@ class Trainer:
             self.dual.load_state_dict(sd["dual"])
         if "value_target" in sd:
             self.value_target.load_state_dict(sd["value_target"])
+        if self.policy_ema is not None and "policy_ema" in sd:
+            self.policy_ema.load_state_dict(sd["policy_ema"])
         self.model_opt.load_state_dict(sd["model_opt"])
         self.policy_opt.load_state_dict(sd["policy_opt"])
         self.value_opt.load_state_dict(sd["value_opt"])

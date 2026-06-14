@@ -244,6 +244,12 @@ optim:
   amp: true             # bf16 autocast for fit losses; penalty always fp32
   actor_clip: 100.0     # actor (policy/planner) grad-norm clip — a stability lever
                         # for the long-horizon planner (lower = tamer updates)
+  # POLICY INERTIA (two-timescale stabilizer): slow EMA of the policy weights, to
+  # give the policy more inertia than the (faster) operator against the collapse.
+  policy_ema_decay: 0.0   # 0 = off. >0 (e.g. 0.99) maintains a slow EMA of the policy
+  policy_ema_act: false   # if EMA on: act/collect with the EMA (behaviour inertia)
+  policy_inertia: 0.0     # if EMA on: add inertia*‖θ_π−θ_π^ema‖² to the policy loss
+                          # (weight inertia / soft trust region; MLP policy only, not planner)
 
 training:
   total_env_steps: 100000
