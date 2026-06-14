@@ -56,6 +56,12 @@ model:
                         # structural priors as op_d (model.operator.w_*) = CONJOINED
                         # smoothness. false = leave p ROUGH (op_p unregularized) while
                         # op_d keeps the dynamics latent SMOOTH = SEPARATE smoothness.
+    radius_p: 0.0       # cf4 (PM 2026-06-14): with smooth_p=false, op_p is fully
+                        # unregularized and its spectral radius drifts >1 (≈1.06),
+                        # making imagined p-rollouts diverge → NaN. radius_p>0 (e.g.
+                        # 0.1, matching op_d's w_radius) reinstates ONLY the radius
+                        # prior relu(σ_max−1)² on op_p — keeps p ROUGH but not
+                        # EXPANSIVE. 0 = off (cf3 behaviour).
   latent_dim: 4         # capped at 4x obs_dim (user rule v2: wider latent ->
                         # more null nodes / longer tails; e.g. 12 on Pendulum)
   hidden: 256
@@ -216,6 +222,14 @@ imagination:
   value_target_decay: 0.98
   pessimism: 0.5        # imagined reward = ensemble mean - pessimism * std
   symexp_margin: 1.5    # symexp clamp = margin * running max |symlog(r)| from real batches
+  reward_clip: 0.0      # cf4: hard cap on per-step imagined reward |r_im| (0 = off).
+                        # Bounds the consequence of an expansive operator before it
+                        # compounds into the λ-returns. Set generously (env reward
+                        # is O(10)) so it bites ONLY on pathological blowups.
+  return_clip: 0.0      # cf4: hard cap on the imagined λ-returns |R| (0 = off). The
+                        # last line of defence before the policy/value loss — set well
+                        # above healthy imagined returns (O(1-100)) so it never distorts
+                        # learning, only catches inf/NaN divergence.
   align_weight: 0.0     # imagination-latent alignment (2507.16450): pull imagined
                         # latents onto the encoder manifold (match z0 mean/std) to
                         # combat drift/collapse — esp. for the long-horizon planner.
@@ -245,6 +259,13 @@ optim:
   amp: true             # bf16 autocast for fit losses; penalty always fp32
   actor_clip: 100.0     # actor (policy/planner) grad-norm clip — a stability lever
                         # for the long-horizon planner (lower = tamer updates)
+  value_clip: 0.0       # cf4: value grad-norm clip (0 = off/unclipped, the legacy
+                        # behaviour). The value net regresses to the imagined returns,
+                        # so a return blowup explodes its grad too — clip it like the actor.
+  skip_nonfinite: false # cf4: when true, SKIP the optimizer step (model/policy/value)
+                        # whenever its grad norm is non-finite — one diverged rollout
+                        # can't poison the weights, so the run recovers instead of dying
+                        # in NaN. Default false = legacy (step regardless).
   # POLICY INERTIA (two-timescale stabilizer): slow EMA of the policy weights, to
   # give the policy more inertia than the (faster) operator against the collapse.
   policy_ema_decay: 0.0   # 0 = off. >0 (e.g. 0.99) maintains a slow EMA of the policy

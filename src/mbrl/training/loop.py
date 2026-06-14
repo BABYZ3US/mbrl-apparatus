@@ -131,6 +131,14 @@ class Trainer:
             # smooth_p: regularize op_p like op_d (conjoined) or leave p rough (separate)
             self.op_w_p = (dict(self.op_w) if bool(_dl.get("smooth_p", True))
                            else {kk: 0.0 for kk in ("normal", "smooth", "spread", "radius")})
+            # cf4: even with p left ROUGH (smooth_p=false ⇒ no normal/smooth/spread
+            # priors), optionally BOUND op_p's spectral radius so imagined p-rollouts
+            # can't diverge (the NaN root cause). radius_p>0 reinstates ONLY the radius
+            # prior on op_p (relu(σ_max−1)²): roughness (sharp reward/value structure) is
+            # preserved, expansiveness (σ_max>1) is not. 0 = off (the cf3 behaviour).
+            _radius_p = float(_dl.get("radius_p", 0.0) or 0.0)
+            if _radius_p > 0.0:
+                self.op_w_p = {**self.op_w_p, "radius": _radius_p}
         # heads read the POLICY latent p in dual mode (dim p_dim), else the backbone z
         rk = self.dual.p_dim if self.dual_latent else k
         self.reward = RewardModel(rk, action_dim, h, d, task_dim=task_dim,
@@ -176,6 +184,22 @@ class Trainer:
         # actor grad-clip — the transformer-stabilization study's levers.
         self.align_weight = float(cfg.imagination.get("align_weight", 0.0))
         self.actor_clip = float(cfg.optim.get("actor_clip", 100.0))
+        # NaN-stabilization levers (cf4, PM 2026-06-14). Diagnosed on cf3-i0-s2 @100k:
+        # the twin's UNREGULARIZED policy operator op_p (radius_p≈1.06>1) makes imagined
+        # p-rollouts grow geometrically; right as the policy crosses return≈0 a rollout
+        # diverges → imagined returns → inf → actor grad → 46k → NaN. loss/total stayed
+        # ~1e-3 the whole time, so normalizing IT is the wrong target — the blowup is the
+        # actor gradient on diverging returns. Defence in depth (all default-off ⇒ legacy
+        # byte-exact): reward_clip/return_clip cap the imagined reward + λ-returns BEFORE
+        # they reach the policy/value loss; value_clip grad-clips the value optimizer (was
+        # unclipped); skip_nonfinite skips the opt step when the grad norm is non-finite so
+        # one bad rollout can't poison the weights (the run recovers). The root cause is
+        # bounded separately by model.dual_latent.radius_p (op_p's spectral radius).
+        self.reward_clip = float(cfg.imagination.get("reward_clip", 0.0) or 0.0)
+        self.return_clip = float(cfg.imagination.get("return_clip", 0.0) or 0.0)
+        self.value_clip = float(cfg.optim.get("value_clip", 0.0) or 0.0)
+        self.skip_nonfinite = bool(cfg.optim.get("skip_nonfinite", False))
+        self._nonfinite_skips = 0   # diagnostic counter (checkpointed for bitwise resume)
         # Policy INERTIA (PM 2026-06-13): give the policy extra inertia relative to
         # the (faster) operator — a two-timescale stabilizer against the collapse
         # (the policy lunging at transient model errors). A slow EMA of the policy
@@ -848,9 +872,13 @@ class Trainer:
             bound = self.symexp_margin * self.symlog_bound
             heads = symexp(heads.clamp(-bound, bound))
         if heads.shape[0] == 1:
-            return heads[0], heads.new_zeros(())
-        std = heads.std(0)
-        return heads.mean(0) - self.pessimism * std, std.mean().detach()
+            rew, dis = heads[0], heads.new_zeros(())
+        else:
+            std = heads.std(0)
+            rew, dis = heads.mean(0) - self.pessimism * std, std.mean().detach()
+        if self.reward_clip > 0.0:   # cf4: cap imagined reward so an expansive op_p
+            rew = rew.clamp(-self.reward_clip, self.reward_clip)   # can't blow returns to inf
+        return rew, dis
 
     def _imagination_horizon(self) -> int:
         """Curvature-certified horizon: imagine further only as the penalty EMA
@@ -1090,8 +1118,17 @@ class Trainer:
         self.model_opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 100.0)
-        self.model_opt.step()
-        self.ema.update(self.encoder)
+        _stepped = True
+        if self.skip_nonfinite:   # cf4: a NaN model loss must not poison the weights
+            _mnorm = torch.nn.utils.clip_grad_norm_(
+                (pp for g in self.model_opt.param_groups for pp in g["params"]),
+                float("inf"))     # measure-only (inf ⇒ no extra clip beyond the encoder)
+            _stepped = bool(torch.isfinite(_mnorm))
+            if not _stepped:
+                self._nonfinite_skips += 1
+        if _stepped:
+            self.model_opt.step()
+            self.ema.update(self.encoder)
         self.step += 1
         if _math.isfinite(pen_val):
             self.pen_ema = (pen_val if self.pen_ema is None
@@ -1143,6 +1180,10 @@ class Trainer:
             adv, returns = gae_advantages(rs, v_tgt, gamma, lam_ret)
         else:
             returns, adv = lambda_returns(rs, v_tgt, gamma, lam_ret), None
+        if self.return_clip > 0.0:   # cf4: hard-bound the λ-returns (and GAE advantage)
+            returns = returns.clamp(-self.return_clip, self.return_clip)  # so a diverged
+            if adv is not None:                                           # imagined rollout
+                adv = adv.clamp(-self.return_clip, self.return_clip)      # can't NaN the loss
 
         with torch.no_grad():
             lo = torch.quantile(returns.detach().float(), 0.05)
@@ -1169,7 +1210,10 @@ class Trainer:
         self.policy_opt.zero_grad(set_to_none=True)
         pi_loss.backward()
         gnorm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.actor_clip)
-        self.policy_opt.step()
+        if (not self.skip_nonfinite) or torch.isfinite(gnorm):   # cf4: don't poison θ_π
+            self.policy_opt.step()
+        else:
+            self._nonfinite_skips += 1
 
         flat = ps[:-1].detach().reshape(-1, ps.shape[-1])
         v_tau = tau0.repeat(H, 1) if tau0 is not None else None
@@ -1177,7 +1221,16 @@ class Trainer:
         v_loss = F.mse_loss(v, returns.detach())
         self.value_opt.zero_grad(set_to_none=True)
         v_loss.backward()
-        self.value_opt.step()
+        if self.value_clip > 0.0 or self.skip_nonfinite:   # cf4: clip the value grad
+            vnorm = torch.nn.utils.clip_grad_norm_(       # (was unclipped) + skip on NaN
+                self.value.parameters(),
+                self.value_clip if self.value_clip > 0.0 else float("inf"))
+            if (not self.skip_nonfinite) or torch.isfinite(vnorm):
+                self.value_opt.step()
+            else:
+                self._nonfinite_skips += 1
+        else:
+            self.value_opt.step()
         decay = cfg_i.get("value_target_decay", 0.98)
         with torch.no_grad():
             for pt, pp in zip(self.value_target.parameters(), self.value.parameters()):
@@ -1188,7 +1241,8 @@ class Trainer:
                 "policy/entropy": entropy.item(), "policy/ret_scale": self.ret_scale,
                 "imagine/horizon": H, "imagine/return_mean": returns.mean().item(),
                 "imagine/return_var": returns.var().item(),
-                "imagine/align": align_val, "actor/grad_norm": float(gnorm)}
+                "imagine/align": align_val, "actor/grad_norm": float(gnorm),
+                "stab/nonfinite_skips": self._nonfinite_skips}
 
     def _policy_inertia_term(self):
         """Soft trust-region anchor inertia*‖θ_π − θ_π^ema‖² (0.0 when off). Pulls
@@ -1294,6 +1348,8 @@ class Trainer:
                 **({"dual": self.dual.state_dict()} if self.dual_latent else {}),
                 # data-driven symexp clamp bound (bitwise resume)
                 "symlog_bound": self.symlog_bound,
+                # cf4 non-finite-grad skip counter (diagnostic; bitwise resume)
+                "nonfinite_skips": self._nonfinite_skips,
                 # auto-dose: computed lam0 + warmup accumulators (bitwise resume)
                 "lam0_sched": self.lam.lam0, "lam0_auto": self.lam0_auto,
                 "ad_count": self.ad_count, "ad_fit_sum": self.ad_fit_sum,
@@ -1351,6 +1407,7 @@ class Trainer:
         self.step = sd["step"]
         self.ret_scale = sd.get("ret_scale", 1.0)
         self.symlog_bound = sd.get("symlog_bound", 1.0)
+        self._nonfinite_skips = sd.get("nonfinite_skips", 0)
         if "lam0_sched" in sd:  # auto-dose may have rewritten the schedule's lam0
             self.lam.lam0 = sd["lam0_sched"]
         self.lam0_auto = sd.get("lam0_auto", None)
