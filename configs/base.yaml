@@ -68,6 +68,11 @@ model:
                         # axis). 'we really only need rank-2-ness' (a running gait is a
                         # 2D limit cycle). Pairs with model.operator.rank=2. Default off.
       enabled: false
+      energy_anchor: 0.0     # cf7-fix (PM 2026-06-14): add anchor·½‖d‖² (latent kinetic
+                        # energy) to the learned E head so it CAN'T collapse to a constant.
+                        # Without it E→const trivially zeros both one-sided penalties
+                        # (dissip + lyap observed exactly 0 in cf6/cf7 — the energy term
+                        # was vacuous). >0 (e.g. 1.0) makes the energy non-degenerate.
       energy_mode: lyapunov  # lyapunov = a learned scalar E(d), axis −∇_z E(D(z)),
                         # grounded by relu(E(op_d(d,0))−E(d)) (autonomous drift descends
                         # it). | contractive = op_d's smallest right-singular vector

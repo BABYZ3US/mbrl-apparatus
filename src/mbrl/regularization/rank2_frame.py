@@ -36,14 +36,26 @@ class EnergyHead(nn.Module):
     """Learned Lyapunov-style scalar energy E(d) on the dynamics latent d. The
     minimal-energy direction is −∇E; it is grounded (see lyapunov_grounding) by
     requiring the autonomous dynamics drift to descend it, so it tracks the system's
-    natural relaxation rather than an arbitrary scalar."""
+    natural relaxation rather than an arbitrary scalar.
 
-    def __init__(self, d_dim: int, hidden: int = 256, depth: int = 2):
+    `anchor` (cf7-fix, PM 2026-06-14) adds a non-collapsible quadratic floor
+    E(d) = head(d) + anchor·½‖d‖² (the latent KINETIC energy / 'temperature'). Without
+    it the head collapses to a CONSTANT — the trivial minimizer of the one-sided
+    penalties relu(E(d')−E(d)−r) and relu(E(d_auto)−E(d)), which both go to exactly 0
+    and make the dissipativity VACUOUS (observed in cf6/cf7). The ½‖d‖² term varies with
+    d, so a constant head can no longer zero them; energy growth must be paid for by
+    reward, which is the intended constraint."""
+
+    def __init__(self, d_dim: int, hidden: int = 256, depth: int = 2, anchor: float = 0.0):
         super().__init__()
         self.net = mlp([d_dim] + [hidden] * depth + [1])
+        self.anchor = float(anchor)
 
     def forward(self, d: Tensor) -> Tensor:
-        return self.net(d).squeeze(-1)
+        e = self.net(d).squeeze(-1)
+        if self.anchor > 0.0:
+            e = e + self.anchor * 0.5 * (d * d).sum(-1)
+        return e
 
 
 def axis_cos2(g_r: Tensor, g_e: Tensor, eps: float = 1e-8) -> Tensor:

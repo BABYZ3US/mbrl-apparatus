@@ -88,6 +88,21 @@ def test_energy_head_grounding_runs():
     assert g.item() >= 0.0 and math.isfinite(g.item())
 
 
+def test_energy_anchor_prevents_constant_collapse():
+    """cf7-fix: the ½‖d‖² anchor ties E to the latent norm, so a constant head can no
+    longer zero the energy differences (the cause of dissip/lyap collapsing to 0)."""
+    seed_everything(0)
+    e0 = EnergyHead(4, 16, 1, anchor=0.0)
+    e1 = EnergyHead(4, 16, 1, anchor=1.0)
+    d = torch.randn(8, 4); big = d * 5.0
+    assert (e1(big) - e1(d)).abs().mean() > (e0(big) - e0(d)).abs().mean()
+    cfg = _cfg(energy_mode="lyapunov")
+    cfg.model.dual_latent.rank2_frame.energy_anchor = 1.0
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    assert t.energy.anchor == 1.0
+    assert math.isfinite(t.model_update(_batch())["loss/total"])
+
+
 # ---- wiring ----
 def test_lyapunov_frame_trains_and_logs():
     seed_everything(0)

@@ -151,6 +151,7 @@ class Trainer:
             _rf = dict(_dl.get("rank2_frame", {}) or {})
             self.frame_enabled = bool(_rf.get("enabled", False))
             self.frame_energy_mode = str(_rf.get("energy_mode", "lyapunov"))
+            self.frame_energy_anchor = float(_rf.get("energy_anchor", 0.0) or 0.0)   # anti-collapse
             self.frame_w_ortho = float(_rf.get("w_ortho", 0.0) or 0.0)
             self.frame_w_rank2 = float(_rf.get("w_rank2", 0.0) or 0.0)
             self.frame_w_lyap = float(_rf.get("w_lyap", 0.0) or 0.0)
@@ -179,7 +180,8 @@ class Trainer:
             if self.frame_enabled and self.frame_energy_mode == "lyapunov":
                 from ..regularization.rank2_frame import EnergyHead
                 self.energy = EnergyHead(self.dual.d_dim, cfg.model.hidden,
-                                         cfg.model.depth).to(device)
+                                         cfg.model.depth,
+                                         anchor=self.frame_energy_anchor).to(device)
         # heads read the POLICY latent p in dual mode (dim p_dim), else the backbone z
         rk = self.dual.p_dim if self.dual_latent else k
         self.reward = RewardModel(rk, action_dim, h, d, task_dim=task_dim,
