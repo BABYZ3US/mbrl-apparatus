@@ -1211,16 +1211,15 @@ class Trainer:
 
     def observe_return(self, ep_return: float) -> None:
         """Feed the latest ACTUAL eval return to the return-gate (penalty.return_gate).
-        Maps the return EMA to gate ∈ [floor,1], SIGN-AWARE about the midpoint
-        `rg_mid` (default 0): genuinely-positive return -> gate -> floor (relax
-        lambda), negative -> gate -> 1 (hold lambda high), NO spike near zero.
-
-        `rg_shape`:
-          - 'quadratic' (default): gate = floor + (1-floor)*(1-frac²), frac = the
-            clipped positive distance (R̄-mid)/scale ∈ [0,1]. λ is held high through
-            negative/zero return and relaxes along a parabola for positive return —
-            a smooth, monotone slope to follow (no sigmoid saturation in the band).
-          - 'sigmoid': gate = floor + (1-floor)*(1-σ((R̄-mid)/scale)).
+        Maps the return EMA to gate ∈ [floor,1] about the midpoint `rg_mid` (default
+        0 = the do-nothing↔running boundary on HalfCheetah). `rg_shape` selects the
+        gate's response curve (all full-range, smooth, slew-limited):
+          - 'quadratic' (default): MONOTONE convex — λ high for return ≤ mid, relaxes
+            to floor along a parabola for return > mid.
+          - 'cuberoot': MONOTONE concave — relaxes λ faster (the gate-curvature axis).
+          - 'sigmoid': MONOTONE 1-σ.
+          - 'bump': PEAKED — MAX λ at mid (the "phase transition"), released
+            quadratically both above and below (penalize hardest where unstable).
         `rg_slew` caps the per-eval change so a collapse can't spike the gate.
         No-op when disabled. ret_ema + rg_gate_now are checkpointed."""
         import math as _m
@@ -1230,17 +1229,23 @@ class Trainer:
                         else self.rg_decay * self.ret_ema
                         + (1 - self.rg_decay) * ep_return)
         z = (self.ret_ema - self.rg_mid) / max(self.rg_scale, 1e-6)
+        u = max(min(z, 1.0), -1.0)               # signed distance from mid, clipped
         if self.rg_shape == "sigmoid":
             relax = 1.0 - 1.0 / (1.0 + _m.exp(-max(min(z, 60.0), -60.0)))   # 1-σ
+        elif self.rg_shape == "bump":
+            # PEAKED at mid: MAX lambda at the "phase transition" (return ≈ mid),
+            # released QUADRATICALLY both above AND below (relax = 1 - u²). Penalize
+            # hardest where the policy is unstable (the do-nothing↔running boundary);
+            # free it when clearly good (high +) or clearly failed (deep −). Not a
+            # monotone gate — heuristic, in the vein of the trace penalty (PM).
+            relax = 1.0 - u * u
         else:
             # FULL-RANGE power gate over the band [mid-scale, mid+scale]:
-            # relax = 1 - frac^p, frac = (clip(z,-1,1)+1)/2 ∈ [0,1]. lambda varies
-            # smoothly with return on BOTH sides of mid (gate=1 below mid-scale,
-            # floor above mid+scale). The exponent p is the GATE CURVATURE:
+            # relax = 1 - frac^p, frac = (u+1)/2 ∈ [0,1]. lambda varies smoothly with
+            # return on BOTH sides of mid (gate=1 below mid-scale, floor above
+            # mid+scale). The exponent p is the GATE CURVATURE:
             #   quadratic (p=2):  convex — holds lambda high, relaxes late.
             #   cuberoot  (p=1/3): concave — relaxes lambda fast, then flattens.
-            # The axis that tests whether the gate's curvature/degree matters (PM).
-            u = max(min(z, 1.0), -1.0)
             frac = (u + 1.0) / 2.0
             p = (1.0 / 3.0) if self.rg_shape == "cuberoot" else 2.0
             relax = 1.0 - frac ** p

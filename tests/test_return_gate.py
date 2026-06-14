@@ -110,6 +110,23 @@ def test_cuberoot_vs_quadratic_curvature():
         prev = g
 
 
+def test_bump_peaked_at_mid_symmetric():
+    """bump shape: MAX λ at mid (gate=1), released quadratically BOTH directions to
+    floor at mid±scale, symmetric about mid. Not monotone — peaked."""
+    seed_everything(0)
+    def gate(r):
+        t = Trainer(_cfg(floor=0.1, decay=0.0, mid=0.0, scale=400.0, slew=1.0,
+                         shape="bump"), obs_dim=3, action_dim=2)
+        t.observe_return(r); return t.rg_gate_now
+    assert abs(gate(0.0) - 1.0) < 1e-6                       # MAX λ at the transition
+    assert abs(gate(400.0) - 0.1) < 1e-6 and abs(gate(-400.0) - 0.1) < 1e-6   # floor both sides
+    assert abs(gate(200.0) - gate(-200.0)) < 1e-6           # symmetric about mid
+    assert gate(200.0) < gate(0.0) and gate(-200.0) < gate(0.0)   # drops off both ways
+    assert abs(gate(200.0) - 0.775) < 1e-6                  # quadratic dropoff: 0.1+0.9*(1-.25)
+    for r in (-5000.0, 0.0, 5000.0):                         # bounded, clipped beyond ±scale
+        assert 0.1 - 1e-9 <= gate(r) <= 1.0 + 1e-9
+
+
 def test_slew_limits_the_spike():
     """A collapse can't spike the gate: starting at 1.0, one big-positive eval can
     move the gate by at most `slew`, not jump straight to the floor."""

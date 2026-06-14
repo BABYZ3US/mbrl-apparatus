@@ -105,9 +105,10 @@ penalty:
                         # to floor*schedule (here 10%); floor>0 ⇒ never zero (R14).
                         # 0.5 was too high (PM) — set lower still (0.05/0.02) if wanted.
     decay: 0.95         # return EMA decay (eval is sparse, so a slower EMA)
-    shape: quadratic    # gate curvature: quadratic (p=2, convex — holds λ high,
-                        # relaxes late) | cuberoot (p=1/3, concave — relaxes λ fast,
-                        # flattens) | sigmoid. Full-range power gate relax=1-frac^p.
+    shape: quadratic    # MONOTONE: quadratic (p=2 convex) | cuberoot (p=1/3 concave)
+                        # | sigmoid — λ relaxed as return rises (relax=1-frac^p).
+                        # PEAKED: bump — MAX λ at mid (return≈0 "phase transition"),
+                        # released quadratically above AND below (relax=1-u²).
     mid: 0.0            # return anchor: gate=full for R̄≤mid, relaxes for R̄>mid;
                         # 0 = the do-nothing boundary on HalfCheetah → distinguishes +/-
     scale: 100.0        # return units over which the gate relaxes mid→mid+scale (quadratic)
