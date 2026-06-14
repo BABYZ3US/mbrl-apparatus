@@ -2,13 +2,15 @@
 # COLLAPSE-FIX ROUND 2 (PM 2026-06-13). Round 1 verdict: align_weight=1.0 was too
 # weak — NaN-prone, didn't hold the gait; QUADRATIC gate > cuberoot (settled). This
 # round applies the STRONGER collapse levers on the winning config (twin smooth-d/
-# rough-p, DreamSmooth OFF, λ=1e-3, QUADRATIC reward-gate, best-ckpt):
+# rough-p, DreamSmooth OFF, λ=1e-3, best-ckpt) with the BUMP reward-gate (PM): λ
+# MAXED at the return≈0 "phase transition", released both ways — brace the policy
+# where it's unstable (crossing 0, incl. on the way DOWN through a collapse).
 #   align {5, 10}  x  inertia {i0=off, i1=on}  x  seeds {0,1,2}  = 12 runs @ 500k.
 # inertia i1 = slow policy EMA used for ACTING (policy_ema_act) + a soft weight
 # anchor (policy_inertia) — two-timescale stabilizer: the policy gets extra inertia
 # vs the faster operator so it can't lunge at transient model errors.
 # Judge by FINAL/peak (did the gait HOLD) and NaN rate (did stabilization help).
-# Fresh 'cf2-' prefix => no name collision with the round-1 cfix-* artifacts.
+# Fresh 'cf2b-' prefix => no collision with cfix-* (round 1) or cf2-* (quadratic try).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,7 +34,7 @@ model.dual_latent.mode=twin model.dual_latent.couple_weight=0.1 model.dual_laten
 model.dual_latent.penalize_reward=true model.reward_heads=1 penalty.form=frobenius env=halfcheetah \
 training.total_env_steps=${STEPS} logging.video.enabled=false penalty.auto_dose.enabled=false \
 penalty.schedule.kind=cuberoot penalty.schedule.lam0=1e-3 smoothing.enabled=false \
-penalty.return_gate.enabled=true penalty.return_gate.shape=quadratic penalty.return_gate.mid=0.0 \
+penalty.return_gate.enabled=true penalty.return_gate.shape=bump penalty.return_gate.mid=0.0 \
 penalty.return_gate.scale=400.0"
 
 inertia_cfg() {   # $1 = i0 | i1
@@ -49,7 +51,7 @@ for align in $ALIGNS; do
 	for inr in $INERTIAS; do
 		for seed in $SEEDS; do
 			throttle
-			tag="cf2-a${align}-${inr}-s${seed}"
+			tag="cf2b-a${align}-${inr}-s${seed}"
 			log="results/gridlogs/${tag}.log"
 			gpu=$((idx % NGPU)); idx=$((idx + 1))
 			echo "launching ${tag} on GPU ${gpu} -> ${log}"
