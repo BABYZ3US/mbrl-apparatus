@@ -86,16 +86,25 @@ penalty:
     floor: 0.1          # gate floor: lam never released below floor*schedule
     decay: 0.99         # disagreement EMA decay (same family as adaptive horizon)
   return_gate:          # RETURN-paced lambda (PM 2026-06-13): weakly tie lam(t) to
-                        # ACTUAL eval return — full lam while return is low (early /
-                        # exploiting), relaxed toward `floor` as actual return climbs
-                        # to its running best. Keyed on ACTUAL (not imagined) return,
-                        # so reward-exploitation — high imagined / low actual — keeps
-                        # return low → lam stays high (self-correcting; defuses the
-                        # episode-reward feedback failure mode recorded 2026-06-11).
-                        # gate in [floor, 1]; floor>0 ⇒ lam never hits zero (R14).
+                        # ACTUAL eval return. ABSOLUTE + SIGN-AWARE + SMOOTH:
+                        # gate = floor + (1-floor)*(1 - σ((R̄ - mid)/scale)).
+                        # genuinely-positive return (R̄≫mid) → gate→floor (relax lam);
+                        # negative (R̄≪mid) → gate→1 (hold lam high); R̄≈mid → middle
+                        # of [floor,1] (NO spike near zero). Keyed on ACTUAL (not
+                        # imagined) return ⇒ exploitation (high imagined/low actual)
+                        # keeps return low ⇒ lam stays high (self-correcting; defuses
+                        # the episode-reward feedback mode recorded 2026-06-11).
+                        # gate in [floor,1]; floor>0 ⇒ lam never hits zero (R14).
     enabled: false      # DEFAULT OFF
-    floor: 0.5          # WEAK by design: lam modulated by at most 1/floor = 2x
+    floor: 0.1          # gate ∈ [floor,1]: when return is genuinely good, lam relaxes
+                        # to floor*schedule (here 10%); floor>0 ⇒ never zero (R14).
+                        # 0.5 was too high (PM) — set lower still (0.05/0.02) if wanted.
     decay: 0.95         # return EMA decay (eval is sparse, so a slower EMA)
+    mid: 0.0            # return midpoint (gate=mid of [floor,1] here); 0 = the
+                        # do-nothing boundary on HalfCheetah → distinguishes +/- return
+    scale: 100.0        # sigmoid transition width in return units (larger = gentler);
+                        # set to the env's good-vs-bad return spread
+    slew: 0.1           # max |Δgate| per eval — a collapse can't spike lam (anti-spike)
   auto_dose:            # auto-set lam0 from the measured fit/penalty scale ratio
     enabled: true       # DEFAULT ON: dose measured per env (presets that need
                         # fixed doses disable it explicitly)

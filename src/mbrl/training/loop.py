@@ -239,17 +239,23 @@ class Trainer:
                 self.dg_enabled = False
 
         # Return-gated lambda (penalty.return_gate, PM 2026-06-13): a WEAK,
-        # never-zero multiplier on lam(t) keyed on ACTUAL eval return. Full lam
-        # while return is low; relaxed toward `floor` as return climbs to its
-        # running best. Keyed on actual (not imagined) return => reward
-        # exploitation keeps return low => lam stays high (self-correcting).
-        # Fed by Trainer.observe_return() from the eval loop; ret_ema/lo/hi are
-        # checkpointed (no new RNG -> bitwise resume). rg_gate_now stays 1.0 off.
+        # never-zero multiplier on lam(t) keyed on ACTUAL eval return. ABSOLUTE,
+        # SIGN-AWARE, SMOOTH (rev. 2026-06-13): gate = floor + (1-floor)*(1-σ((R̄
+        # - mid)/scale)). Genuinely-positive return (R̄ ≫ mid) -> gate -> floor
+        # (relax lam); negative return (R̄ ≪ mid) -> gate -> 1 (hold lam high);
+        # R̄ ≈ mid -> mid of [floor,1] (NO spike near zero). `mid` (default 0 = the
+        # do-nothing boundary on HalfCheetah) makes it sign-aware; `slew` caps the
+        # per-eval change so a collapse can't spike lam. No running min/max (so no
+        # degenerate span, no outlier ratchet). Fed by observe_return() from eval;
+        # ret_ema + rg_gate_now checkpointed (no new RNG -> bitwise resume).
         rg = cfg.penalty.get("return_gate", None)
         self.rg_enabled = bool(rg and rg.get("enabled", False))
-        self.rg_floor = float(rg.get("floor", 0.5)) if rg else 0.5
+        self.rg_floor = float(rg.get("floor", 0.1)) if rg else 0.1   # 0.5 was too high (PM)
         self.rg_decay = float(rg.get("decay", 0.95)) if rg else 0.95
-        self.ret_ema, self.ret_lo, self.ret_hi = None, None, None  # checkpointed
+        self.rg_mid = float(rg.get("mid", 0.0)) if rg else 0.0       # return midpoint (sign anchor)
+        self.rg_scale = float(rg.get("scale", 100.0)) if rg else 100.0  # sigmoid transition width
+        self.rg_slew = float(rg.get("slew", 0.1)) if rg else 0.1     # max gate change per eval
+        self.ret_ema = None      # checkpointed
         self.rg_gate_now = 1.0   # current gate factor (1.0 = disabled / full lam)
 
         # Spectral reward path (spectral.enabled): the reward is an ensemble of
@@ -1168,21 +1174,24 @@ class Trainer:
     def observe_return(self, ep_return: float) -> None:
         """Feed the latest ACTUAL eval return to the return-gate
         (penalty.return_gate). Updates the return EMA + running [lo,hi] range and
-        recomputes rg_gate_now in [floor,1]: ~1 at the worst return seen, ~floor at
-        the best — so lambda decays as the policy genuinely improves but rises again
-        if return falls (self-correcting; exploitation keeps actual return low).
-        No-op when the gate is disabled. ret_ema/lo/hi are checkpointed."""
+        Maps the return EMA to gate ∈ [floor,1] via a SMOOTH, SIGN-AWARE sigmoid
+        about a fixed midpoint `rg_mid` (default 0): genuinely-positive return ->
+        gate -> floor (relax lambda), negative return -> gate -> 1 (hold lambda
+        high), return ≈ mid -> middle of [floor,1] (NO spike near zero — the bug
+        the running-min/max form had). `rg_slew` limits the per-eval change so a
+        collapse can't spike the gate. No-op when disabled. ret_ema + rg_gate_now
+        are checkpointed."""
         import math as _m
         if not self.rg_enabled or not _m.isfinite(ep_return):
             return
         self.ret_ema = (ep_return if self.ret_ema is None
                         else self.rg_decay * self.ret_ema
                         + (1 - self.rg_decay) * ep_return)
-        self.ret_lo = self.ret_ema if self.ret_lo is None else min(self.ret_lo, self.ret_ema)
-        self.ret_hi = self.ret_ema if self.ret_hi is None else max(self.ret_hi, self.ret_ema)
-        span = self.ret_hi - self.ret_lo
-        frac = min(max((self.ret_ema - self.ret_lo) / span, 0.0), 1.0) if span > 1e-8 else 0.0
-        self.rg_gate_now = self.rg_floor + (1.0 - self.rg_floor) * (1.0 - frac)
+        z = (self.ret_ema - self.rg_mid) / max(self.rg_scale, 1e-6)
+        frac = 1.0 / (1.0 + _m.exp(-max(min(z, 60.0), -60.0)))   # σ, overflow-safe; ∈(0,1)
+        target = self.rg_floor + (1.0 - self.rg_floor) * (1.0 - frac)
+        lo, hi = self.rg_gate_now - self.rg_slew, self.rg_gate_now + self.rg_slew
+        self.rg_gate_now = min(max(target, lo), hi)             # slew-rate limited
 
     @torch.no_grad()
     def act(self, z: torch.Tensor, tau: torch.Tensor | None = None) -> torch.Tensor:
@@ -1229,9 +1238,8 @@ class Trainer:
                 # disagreement-gate EMA state (bitwise resume)
                 "dis_ema": self.dis_ema, "dis_peak": self.dis_peak,
                 "spec_head_dis": self._spec_head_dis,
-                # return-gate EMA + range (bitwise resume)
-                "ret_ema": self.ret_ema, "ret_lo": self.ret_lo,
-                "ret_hi": self.ret_hi, "rg_gate_now": self.rg_gate_now,
+                # return-gate state (bitwise resume)
+                "ret_ema": self.ret_ema, "rg_gate_now": self.rg_gate_now,
                 "hutchinson_gen": self.gen.get_state()}
         if self.spec_enabled:
             # spectral reward: per-head (W, b, c) + the rolling cache + refit
@@ -1244,7 +1252,16 @@ class Trainer:
                               if h.learn_scales else {})}
                           for h in self.spec_heads],
                 "cache_x": self.spec_cache_x, "cache_y": self.spec_cache_y,
-                "since_refit": self.spec_since_refit, "refits": self.spec_refits}
+                "since_refit": self.spec_since_refit, "refits": self.spec_refits,
+                # SNR-band RNG + the per-head Wiener-weight EMA: load-bearing for
+                # bitwise resume (the SNR generator drives the split-half permutation
+                # consumed on EVERY refit, in poly AND snr modes; the EMA carries the
+                # smoothed band weights that define the reward heads in snr mode).
+                # Without these, a resumed spectral run draws a different split and
+                # restarts the EMA from scratch — a silent reward discontinuity.
+                "snr_gen": self.spec_snr_gen.get_state(),
+                "snr_ema": [t.cpu() if t is not None else None
+                            for t in self.spec_snr_ema]}
             sd["spec_sigma"] = self.spec_sigma          # auto: calibrated ladder
             sd["spec_sigma_star"] = self.spec_sigma_star
             if self.spec_sigma == "learned":
@@ -1274,8 +1291,6 @@ class Trainer:
         self.dis_peak = sd.get("dis_peak", 0.0)
         self._spec_head_dis = sd.get("spec_head_dis", None)
         self.ret_ema = sd.get("ret_ema", None)
-        self.ret_lo = sd.get("ret_lo", None)
-        self.ret_hi = sd.get("ret_hi", None)
         self.rg_gate_now = sd.get("rg_gate_now", 1.0)
         self.ad_count = sd.get("ad_count", 0)
         self.ad_fit_sum = sd.get("ad_fit_sum", 0.0)
@@ -1310,6 +1325,13 @@ class Trainer:
             self.spec_cache_y = sp["cache_y"].clone()
             self.spec_since_refit = sp["since_refit"]
             self.spec_refits = sp["refits"]
+            # restore the SNR generator + Wiener-weight EMA (guarded: checkpoints
+            # written before this fix lack the keys → keep the freshly-seeded state)
+            if "snr_gen" in sp:
+                self.spec_snr_gen.set_state(sp["snr_gen"])
+            if "snr_ema" in sp:
+                self.spec_snr_ema = [t.to(self.device) if t is not None else None
+                                     for t in sp["snr_ema"]]
 
 
 def collect_vectorized(trainer, env, buffer, obs, autoreset, n_steps: int,
