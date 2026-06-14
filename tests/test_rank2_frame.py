@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mbrl.models.dynamics import OperatorDynamics
 from mbrl.regularization.rank2_frame import (EnergyHead, axis_cos2, rank2_tail_penalty,
-                                             lyapunov_grounding, contractive_axis_in_d)
+                                             lyapunov_grounding, contractive_axis_in_d,
+                                             dissipativity_penalty)
 from mbrl.training import Trainer
 from mbrl.utils.checkpoint import CheckpointManager
 from mbrl.utils.seeding import seed_everything
@@ -121,6 +122,29 @@ def test_frame_default_off_is_noop():
     assert not t.frame_enabled and t.energy is None
     m = t.model_update(_batch())
     assert not any(k.startswith("frame/") for k in m)
+
+
+def test_dissipativity_penalty_one_sided():
+    """relu(E(d')−E(d) − supply): always satisfied when supply is huge (penalty 0),
+    always violated when supply is hugely negative (penalty > 0). One-sided."""
+    seed_everything(0)
+    e = EnergyHead(4, 16, 1)
+    d, d_next = torch.randn(8, 4), torch.randn(8, 4)
+    assert dissipativity_penalty(e, d, d_next, torch.full((8,), 1e6)).item() == 0.0
+    assert dissipativity_penalty(e, d, d_next, torch.full((8,), -1e6)).item() > 0.0
+    g = dissipativity_penalty(e, d, d_next, torch.randn(8))
+    assert g.item() >= 0.0 and math.isfinite(g.item())
+
+
+def test_dissipativity_wires_into_model_update():
+    """cf6: w_dissip>0 adds the passivity term on real transitions; logs the residual."""
+    seed_everything(0)
+    cfg = _cfg(energy_mode="lyapunov")
+    cfg.model.dual_latent.rank2_frame.w_dissip = 0.1
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    m = t.model_update(_batch())
+    assert "frame/dissip_resid" in m and math.isfinite(m["frame/dissip_resid"])
+    assert math.isfinite(m["loss/total"])
 
 
 def test_resume_bitwise_with_lyapunov_frame(tmp_path):

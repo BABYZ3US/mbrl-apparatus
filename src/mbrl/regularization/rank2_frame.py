@@ -76,6 +76,23 @@ def lyapunov_grounding(energy: EnergyHead, op_d, d: Tensor, action_dim: int) -> 
     return torch.relu(energy(d_auto) - energy(d)).mean()
 
 
+def dissipativity_penalty(energy: EnergyHead, d: Tensor, d_next: Tensor,
+                          supply: Tensor) -> Tensor:
+    """Soft thermodynamic constraint (PM 2026-06-14) — the SOFTER alternative to hard
+    ∇R⊥∇E orthogonality. The stored energy may increase over a transition only as much
+    as the reward 'supply' earns it:
+
+        E(d') − E(d) ≤ supply     ⇒     penalize  relu(E(d') − E(d) − supply).
+
+    A passivity / dissipativity inequality (storage function E, supply rate = reward;
+    COP ≥ 1). ONE-SIDED: it penalizes only INEFFICIENT energy spending, and explicitly
+    LETS the policy climb energy when it buys reward — what a running gait must do (build
+    kinetic energy for forward-velocity reward), and what rigid orthogonality / the
+    radius clamp forbade (pinning the latent at minimal energy ≈ standing still). The
+    autonomous supply=0 case recovers a pure Lyapunov descent E(d') ≤ E(d)."""
+    return torch.relu(energy(d_next) - energy(d) - supply).mean()
+
+
 def contractive_axis_in_d(op_d, d_sub: Tensor) -> Tensor:
     """Smallest right-singular vector of op_d's state operator A_d at each sample — the
     most-contracted (minimal-energy) direction of the dynamics, in d-space. Detached:

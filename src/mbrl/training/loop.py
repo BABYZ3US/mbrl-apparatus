@@ -151,12 +151,20 @@ class Trainer:
             self.frame_w_ortho = float(_rf.get("w_ortho", 0.0) or 0.0)
             self.frame_w_rank2 = float(_rf.get("w_rank2", 0.0) or 0.0)
             self.frame_w_lyap = float(_rf.get("w_lyap", 0.0) or 0.0)
+            self.frame_w_dissip = float(_rf.get("w_dissip", 0.0) or 0.0)   # cf6 dissipativity
+            self.frame_supply = str(_rf.get("supply", "reward"))
             self.frame_subsample = int(_rf.get("subsample", 64))
             self.frame_target_rank = int(_rf.get("target_rank", 2))
             if self.frame_enabled and self.frame_energy_mode == "contractive" \
                     and self.dual.mode != "twin":
                 raise ValueError("rank2_frame.energy_mode=contractive needs "
                                  "dual_latent.mode=twin (it reads op_d's spectrum)")
+            if self.frame_enabled and self.frame_w_dissip > 0.0 \
+                    and self.frame_supply != "reward":
+                import warnings as _wf
+                _wf.warn(f"rank2_frame.supply={self.frame_supply} not yet wired (only "
+                         "'reward' is — advantage/return need energy in the imagined "
+                         "rollout's p-space); using per-step reward as the supply.")
             if self.frame_enabled and self.frame_energy_mode == "lyapunov":
                 from ..regularization.rank2_frame import EnergyHead
                 self.energy = EnergyHead(self.dual.d_dim, cfg.model.hidden,
@@ -1214,6 +1222,11 @@ class Trainer:
         if self.frame_enabled:   # cf5 rank-2 reward⊥energy frame
             frame_term, frame_metrics = self._rank2_frame(z, d, p, a, tau)
             loss = loss + frame_term
+            if self.frame_w_dissip > 0.0 and self.energy is not None:   # cf6 dissipativity
+                from ..regularization.rank2_frame import dissipativity_penalty
+                dissip = dissipativity_penalty(self.energy, d, self.dual.d_of(z_next_tgt), r)
+                loss = loss + self.frame_w_dissip * dissip
+                frame_metrics["frame/dissip_resid"] = float(dissip.detach())
 
         self.model_opt.zero_grad(set_to_none=True)
         loss.backward()

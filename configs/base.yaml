@@ -77,6 +77,16 @@ model:
       w_rank2: 0.0      # weight on the covariance eigenvalue tail beyond top-`target_rank`
                         # (press z into a rank-2 subspace; the gram_eff_rank→2 objective).
       w_lyap: 0.0       # lyapunov only: weight on the energy-grounding residual.
+      w_dissip: 0.0     # cf6 (PM 2026-06-14): the SOFTER alternative to hard ∇R⊥∇E
+                        # orthogonality — a dissipativity/passivity inequality
+                        # relu(E(d')−E(d) − supply): energy may climb only as much as
+                        # the reward earns it. One-sided ⇒ lets a gait BUILD energy for
+                        # reward (autonomous supply=0 recovers Lyapunov descent). Drop
+                        # w_ortho→0 to use this INSTEAD of orthogonality. Lyapunov only.
+      supply: reward    # dissipativity supply rate: reward = per-step real reward (wired,
+                        # clean — model update). advantage|return = imagined-rollout
+                        # generalizations (future; need energy in p-space). Falls back to
+                        # reward with a warning if set to an unwired mode.
       subsample: 64     # batch rows used for the orthogonality double-backward (cost cap).
       target_rank: 2    # the target effective rank of the representation.
   latent_dim: 4         # capped at 4x obs_dim (user rule v2: wider latent ->
