@@ -253,8 +253,9 @@ class Trainer:
         self.rg_floor = float(rg.get("floor", 0.1)) if rg else 0.1   # 0.5 was too high (PM)
         self.rg_decay = float(rg.get("decay", 0.95)) if rg else 0.95
         self.rg_mid = float(rg.get("mid", 0.0)) if rg else 0.0       # return midpoint (sign anchor)
-        self.rg_scale = float(rg.get("scale", 100.0)) if rg else 100.0  # sigmoid transition width
+        self.rg_scale = float(rg.get("scale", 100.0)) if rg else 100.0  # transition width
         self.rg_slew = float(rg.get("slew", 0.1)) if rg else 0.1     # max gate change per eval
+        self.rg_shape = str(rg.get("shape", "quadratic")) if rg else "quadratic"  # quadratic|sigmoid
         self.ret_ema = None      # checkpointed
         self.rg_gate_now = 1.0   # current gate factor (1.0 = disabled / full lam)
 
@@ -1172,15 +1173,19 @@ class Trainer:
                 "imagine/align": align_val, "actor/grad_norm": float(gnorm)}
 
     def observe_return(self, ep_return: float) -> None:
-        """Feed the latest ACTUAL eval return to the return-gate
-        (penalty.return_gate). Updates the return EMA + running [lo,hi] range and
-        Maps the return EMA to gate ∈ [floor,1] via a SMOOTH, SIGN-AWARE sigmoid
-        about a fixed midpoint `rg_mid` (default 0): genuinely-positive return ->
-        gate -> floor (relax lambda), negative return -> gate -> 1 (hold lambda
-        high), return ≈ mid -> middle of [floor,1] (NO spike near zero — the bug
-        the running-min/max form had). `rg_slew` limits the per-eval change so a
-        collapse can't spike the gate. No-op when disabled. ret_ema + rg_gate_now
-        are checkpointed."""
+        """Feed the latest ACTUAL eval return to the return-gate (penalty.return_gate).
+        Maps the return EMA to gate ∈ [floor,1], SIGN-AWARE about the midpoint
+        `rg_mid` (default 0): genuinely-positive return -> gate -> floor (relax
+        lambda), negative -> gate -> 1 (hold lambda high), NO spike near zero.
+
+        `rg_shape`:
+          - 'quadratic' (default): gate = floor + (1-floor)*(1-frac²), frac = the
+            clipped positive distance (R̄-mid)/scale ∈ [0,1]. λ is held high through
+            negative/zero return and relaxes along a parabola for positive return —
+            a smooth, monotone slope to follow (no sigmoid saturation in the band).
+          - 'sigmoid': gate = floor + (1-floor)*(1-σ((R̄-mid)/scale)).
+        `rg_slew` caps the per-eval change so a collapse can't spike the gate.
+        No-op when disabled. ret_ema + rg_gate_now are checkpointed."""
         import math as _m
         if not self.rg_enabled or not _m.isfinite(ep_return):
             return
@@ -1188,8 +1193,12 @@ class Trainer:
                         else self.rg_decay * self.ret_ema
                         + (1 - self.rg_decay) * ep_return)
         z = (self.ret_ema - self.rg_mid) / max(self.rg_scale, 1e-6)
-        frac = 1.0 / (1.0 + _m.exp(-max(min(z, 60.0), -60.0)))   # σ, overflow-safe; ∈(0,1)
-        target = self.rg_floor + (1.0 - self.rg_floor) * (1.0 - frac)
+        if self.rg_shape == "sigmoid":
+            relax = 1.0 - 1.0 / (1.0 + _m.exp(-max(min(z, 60.0), -60.0)))   # 1-σ
+        else:                                                   # quadratic (default)
+            frac = max(min(z, 1.0), 0.0)        # positive distance above mid, clipped
+            relax = 1.0 - frac * frac           # 1 at/below mid, 0 at mid+scale (parabola)
+        target = self.rg_floor + (1.0 - self.rg_floor) * relax
         lo, hi = self.rg_gate_now - self.rg_slew, self.rg_gate_now + self.rg_slew
         self.rg_gate_now = min(max(target, lo), hi)             # slew-rate limited
 
