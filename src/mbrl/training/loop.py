@@ -110,6 +110,8 @@ class Trainer:
         _dl = dict(cfg.model.get("dual_latent", {}) or {})
         self.dual_latent = bool(_dl.get("enabled", False))
         self.dual = None
+        self.energy = None          # cf5 lyapunov energy head (built below if enabled)
+        self.frame_enabled = False  # cf5 rank-2 reward⊥energy frame (default off)
         if self.dual_latent:
             if not self.dyn_operator:
                 raise ValueError("model.dual_latent requires model.dynamics=operator")
@@ -139,6 +141,26 @@ class Trainer:
             _radius_p = float(_dl.get("radius_p", 0.0) or 0.0)
             if _radius_p > 0.0:
                 self.op_w_p = {**self.op_w_p, "radius": _radius_p}
+            # cf5 rank-2 reward⊥energy frame (model.dual_latent.rank2_frame, PM
+            # 2026-06-14). Default off ⇒ no-op. The (lyapunov) energy head is built
+            # HERE so model_opt trains it (params appended to _model_params below).
+            # See regularization/rank2_frame.py for the term math.
+            _rf = dict(_dl.get("rank2_frame", {}) or {})
+            self.frame_enabled = bool(_rf.get("enabled", False))
+            self.frame_energy_mode = str(_rf.get("energy_mode", "lyapunov"))
+            self.frame_w_ortho = float(_rf.get("w_ortho", 0.0) or 0.0)
+            self.frame_w_rank2 = float(_rf.get("w_rank2", 0.0) or 0.0)
+            self.frame_w_lyap = float(_rf.get("w_lyap", 0.0) or 0.0)
+            self.frame_subsample = int(_rf.get("subsample", 64))
+            self.frame_target_rank = int(_rf.get("target_rank", 2))
+            if self.frame_enabled and self.frame_energy_mode == "contractive" \
+                    and self.dual.mode != "twin":
+                raise ValueError("rank2_frame.energy_mode=contractive needs "
+                                 "dual_latent.mode=twin (it reads op_d's spectrum)")
+            if self.frame_enabled and self.frame_energy_mode == "lyapunov":
+                from ..regularization.rank2_frame import EnergyHead
+                self.energy = EnergyHead(self.dual.d_dim, cfg.model.hidden,
+                                         cfg.model.depth).to(device)
         # heads read the POLICY latent p in dual mode (dim p_dim), else the backbone z
         rk = self.dual.p_dim if self.dual_latent else k
         self.reward = RewardModel(rk, action_dim, h, d, task_dim=task_dim,
@@ -176,6 +198,8 @@ class Trainer:
         _model_params = [*self.encoder.parameters(), *self.reward.parameters()]
         _model_params += (list(self.dual.parameters()) if self.dual_latent
                           else list(self.dynamics.parameters()))
+        if self.energy is not None:          # cf5 lyapunov energy head trains with the model
+            _model_params += list(self.energy.parameters())
         self.model_opt = torch.optim.AdamW(_model_params, lr=cfg.optim.model_lr)
         actor_params = (self.planner if self.use_planner else self.policy).parameters()
         self.policy_opt = torch.optim.AdamW(actor_params, lr=cfg.optim.policy_lr)
@@ -550,6 +574,48 @@ class Trainer:
         return {"latent/gram_cond": float(ev[-1] / ev[0].clamp_min(1e-12)),  # σmax/σmin
                 "latent/gram_eff_rank": float(torch.exp(torch.as_tensor(spectral_entropy))),
                 "latent/gram_spectral_entropy": spectral_entropy}
+
+    # ---------------- rank-2 reward⊥energy frame (cf5) ----------------
+    def _rank2_frame(self, z, d, p, a, tau):
+        """The cf5 frame loss term + diagnostics (see regularization/rank2_frame.py):
+        press z into a rank-2 subspace whose two orthogonal axes are reward-ascent
+        (∇_z R) and energy-descent (−∇_z E, lyapunov | op_d's contractive mode). z must
+        carry grad (it is the live encoder output). Returns (loss_term, metrics)."""
+        from ..regularization.rank2_frame import (axis_cos2, rank2_tail_penalty,
+                                                   lyapunov_grounding, contractive_axis_in_d)
+        dl = self.dual
+        metrics = {}
+        term = z.new_zeros(())
+        # axis orthogonality: cos²(∇_z R, ∇_z E) → 0, double-backward on a subsample
+        if self.frame_w_ortho > 0.0:
+            n = min(self.frame_subsample, z.shape[0])
+            zs = z[:n]
+            a_s = a[:n]
+            tau_s = tau[:n] if tau is not None else None
+            r_hat = self.reward(dl.p_of(zs), a_s, tau_s)            # reward in z via P
+            g_r = torch.autograd.grad(r_hat.sum(), zs, create_graph=True)[0]
+            if self.frame_energy_mode == "contractive":
+                v_min = contractive_axis_in_d(dl.op_d, dl.d_of(zs))  # detached d-direction
+                proj = (dl.d_of(zs) * v_min).sum(-1)
+                g_e = torch.autograd.grad(proj.sum(), zs, create_graph=True)[0]
+            else:                                                  # lyapunov
+                e = self.energy(dl.d_of(zs))
+                g_e = torch.autograd.grad(e.sum(), zs, create_graph=True)[0]
+            ortho = axis_cos2(g_r, g_e)
+            term = term + self.frame_w_ortho * ortho
+            metrics["frame/ortho_cos"] = float(ortho.detach().clamp_min(0.0).sqrt())
+        # rank-2 pressure: press z's variance into its top-`target_rank` eigendirections
+        if self.frame_w_rank2 > 0.0:
+            tail = rank2_tail_penalty(z, self.frame_target_rank)
+            term = term + self.frame_w_rank2 * tail
+            metrics["frame/rank2_tail"] = float(tail.detach())
+        # lyapunov grounding: the autonomous drift must descend E
+        if (self.frame_energy_mode == "lyapunov" and self.energy is not None
+                and self.frame_w_lyap > 0.0):
+            ground = lyapunov_grounding(self.energy, dl.op_d, d, dl.m)
+            term = term + self.frame_w_lyap * ground
+            metrics["frame/lyap_resid"] = float(ground.detach())
+        return term, metrics
 
     # ---------------- model learning ----------------
     def model_update(self, batch) -> dict:
@@ -1144,6 +1210,11 @@ class Trainer:
                 dual_metrics["dual/phase_drift"] = float(   # readout (couple_w raises it)
                     ((cd - cp).norm(dim=-1) / denom).mean())
 
+        frame_metrics = {}
+        if self.frame_enabled:   # cf5 rank-2 reward⊥energy frame
+            frame_term, frame_metrics = self._rank2_frame(z, d, p, a, tau)
+            loss = loss + frame_term
+
         self.model_opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 100.0)
@@ -1169,7 +1240,8 @@ class Trainer:
                "penalty/return_gate": self.rg_gate_now,
                "loss/total": loss.item(), "step": self.step,
                "latent/z_std": z.detach().std(0).mean().item(),
-               **op_metrics, **dual_metrics, **self._representation_readouts(z)}
+               **op_metrics, **dual_metrics, **frame_metrics,
+               **self._representation_readouts(z)}
         if vae_metrics is not None:
             out |= vae_metrics
         return out
@@ -1375,6 +1447,7 @@ class Trainer:
                 "ret_scale": self.ret_scale,
                 **({"planner": self.planner.state_dict()} if self.use_planner else {}),
                 **({"dual": self.dual.state_dict()} if self.dual_latent else {}),
+                **({"energy": self.energy.state_dict()} if self.energy is not None else {}),
                 # data-driven symexp clamp bound (bitwise resume)
                 "symlog_bound": self.symlog_bound,
                 # cf4 non-finite-grad skip counter (diagnostic; bitwise resume)
@@ -1426,6 +1499,8 @@ class Trainer:
             self.planner.load_state_dict(sd["planner"])
         if self.dual_latent and "dual" in sd:
             self.dual.load_state_dict(sd["dual"])
+        if self.energy is not None and "energy" in sd:
+            self.energy.load_state_dict(sd["energy"])
         if "value_target" in sd:
             self.value_target.load_state_dict(sd["value_target"])
         if self.policy_ema is not None and "policy_ema" in sd:

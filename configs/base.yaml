@@ -62,6 +62,23 @@ model:
                         # 0.1, matching op_d's w_radius) reinstates ONLY the radius
                         # prior relu(σ_max−1)² on op_p — keeps p ROUGH but not
                         # EXPANSIVE. 0 = off (cf3 behaviour).
+    rank2_frame:        # cf5 (PM 2026-06-14): organize the latent into a RANK-2 frame
+                        # of two orthogonal axes with opposed senses — reward-ascent
+                        # (∇_z R, the p/control axis) ⊥ energy-descent (the d/dynamics
+                        # axis). 'we really only need rank-2-ness' (a running gait is a
+                        # 2D limit cycle). Pairs with model.operator.rank=2. Default off.
+      enabled: false
+      energy_mode: lyapunov  # lyapunov = a learned scalar E(d), axis −∇_z E(D(z)),
+                        # grounded by relu(E(op_d(d,0))−E(d)) (autonomous drift descends
+                        # it). | contractive = op_d's smallest right-singular vector
+                        # (most-contracted dynamics direction), pulled back to z; no head.
+      w_ortho: 0.0      # weight on cos²(∇_z R, ∇_z E) → 0 (square up the frame). The
+                        # only double-backward term — subsampled (see subsample).
+      w_rank2: 0.0      # weight on the covariance eigenvalue tail beyond top-`target_rank`
+                        # (press z into a rank-2 subspace; the gram_eff_rank→2 objective).
+      w_lyap: 0.0       # lyapunov only: weight on the energy-grounding residual.
+      subsample: 64     # batch rows used for the orthogonality double-backward (cost cap).
+      target_rank: 2    # the target effective rank of the representation.
   latent_dim: 4         # capped at 4x obs_dim (user rule v2: wider latent ->
                         # more null nodes / longer tails; e.g. 12 on Pendulum)
   hidden: 256
