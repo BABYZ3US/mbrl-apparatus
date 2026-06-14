@@ -650,8 +650,14 @@ class Trainer:
                                else dec * self._bal_ema_align + (1 - dec) * a_mag)
         self._bal_ema_energy = (e_mag if self._bal_ema_energy is None
                                 else dec * self._bal_ema_energy + (1 - dec) * e_mag)
-        wa = self.frame_balance_w / (self._bal_ema_align + 1e-8)
-        we = self.frame_balance_w / (self._bal_ema_energy + 1e-8)
+        # cap the adaptive weights: when a side's running magnitude is ~0 (already
+        # satisfied — e.g. couple≈0 when the sectors are aligned), its 1/ema weight
+        # explodes (observed bal_w_align≈1e6) and would amplify that side's gradient a
+        # million-fold. Cap at 10× so a near-zero penalty can't blow up; the side that
+        # genuinely needs balancing (e.g. the energy) sits well under the cap.
+        wmax = 10.0
+        wa = min(self.frame_balance_w / (self._bal_ema_align + 1e-8), wmax)
+        we = min(self.frame_balance_w / (self._bal_ema_energy + 1e-8), wmax)
         term = wa * align + we * energy
         return term, {"frame/bal_w_align": wa, "frame/bal_w_energy": we,
                       "frame/bal_align": a_mag, "frame/bal_energy": e_mag}

@@ -182,6 +182,8 @@ def test_equilibrium_balance_applies_both_penalties():
             "frame/bal_align", "frame/bal_energy"} <= set(m)
     assert math.isfinite(m["loss/total"])
     assert t._bal_ema_align is not None and t._bal_ema_energy is not None
+    # weights are capped (a near-zero penalty can't explode its 1/ema weight)
+    assert m["frame/bal_w_align"] <= 10.0 and m["frame/bal_w_energy"] <= 10.0
 
 
 def test_resume_bitwise_with_balance(tmp_path):
