@@ -105,8 +105,17 @@ def validate_spec(spec: dict) -> list[str]:
             warns.append("model.encoder=custom but encoder_net is empty — wire an "
                          "NN-layer chain into the encoder's net pin")
         else:
-            from ..models.net_builder import check_net_ranks
-            warns.extend("encoder_net: " + e for e in check_net_ranks(net, 1))
+            # check_net_ranks lives in mbrl.models.net_builder, which transitively
+            # imports torch — NOT available inside the sealed boundary (this module
+            # is documented torch-free). Degrade gracefully: skip the rank warnings
+            # when torch is absent (the Studio already rank-checks at author time via
+            # compile.gd) rather than crashing the bridge server's client thread.
+            try:
+                from ..models.net_builder import check_net_ranks
+            except ImportError:
+                pass
+            else:
+                warns.extend("encoder_net: " + e for e in check_net_ranks(net, 1))
     spectral = _as_dict(spec.get("spectral"))
     if not bool(spectral.get("enabled", False)):
         return warns  # non-spectral path: house rules don't apply

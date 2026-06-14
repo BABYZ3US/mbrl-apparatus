@@ -199,8 +199,8 @@ default) and reach it over an **SSH local-forward** — the same key/host you al
 ```
 
 **On your Mac** — forward the pod's bridge port to localhost, then launch the studio
-pointed at it. The helper uses the in-repo `runpod` key and the same `root@<ip> -p <port>`
-line from the Connect tab (§1):
+pointed at it. The helper defaults to the `~/.ssh/runpod` key (override with `-i`) and the
+same `root@<ip> -p <port>` line from the Connect tab (§1):
 ```bash
 cd ~/Claude/Projects/math/godot_studio
 ./tools/tunnel_runpod.sh root@<pod-ip> -p <ssh-port> --launch   # tunnel + studio, one command

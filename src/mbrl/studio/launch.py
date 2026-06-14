@@ -16,6 +16,7 @@ be injected without touching the server (ARCH_RECOMMENDATIONS A3, the cloud-laun
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -26,11 +27,30 @@ class LaunchRegistry:
     One registry lives on the StudioBridgeServer for its lifetime; it holds the live
     Popen handles so status/cancel/tail work across requests. A run is keyed by its
     run_name; re-launching a name supersedes the previous handle.
+
+    Thread-safe: the StudioBridgeServer serves each client on its own thread, so two
+    panels (or the search ticker + a manual pull.launched) can hit launch/list/cancel
+    concurrently. A lock guards every `_runs` mutation and snapshot — without it,
+    `list()` iterating while `launch()` inserts raises "dict changed size during
+    iteration" and kills that client.
     """
 
     def __init__(self, log_dir):
         self.log_dir = Path(log_dir)
         self._runs: dict[str, dict] = {}  # run_name -> {popen, _fh, pid, started_at, log_path, argv}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _close_fh(rec: dict) -> None:
+        """Release a run's log file handle once (idempotent). Closing a finished/
+        superseded run's handle stops the FD leak (one per launched arm otherwise)."""
+        fh = rec.get("_fh")
+        if fh is not None and not fh.closed:
+            try:
+                fh.close()
+            except OSError:
+                pass
+        rec["_fh"] = None
 
     def launch(self, run_name: str, argv: list, cwd) -> dict:
         """Spawn argv in `cwd`, streaming stdout+stderr to <log_dir>/<run_name>.log."""
@@ -38,53 +58,70 @@ class LaunchRegistry:
         log_path = self.log_dir / f"{run_name}.log"
         fh = open(log_path, "w", buffering=1)  # line-buffered so tail sees live output
         popen = subprocess.Popen(argv, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT)
-        self._runs[run_name] = {
-            "popen": popen, "_fh": fh, "pid": popen.pid,
-            "started_at": time.time(), "log_path": str(log_path), "argv": list(argv),
-        }
+        rec = {"popen": popen, "_fh": fh, "pid": popen.pid,
+               "started_at": time.time(), "log_path": str(log_path), "argv": list(argv)}
+        with self._lock:
+            superseded = self._runs.get(run_name)
+            self._runs[run_name] = rec
+        if superseded is not None:
+            self._close_fh(superseded)  # don't leak the replaced run's log handle
         return {"run_name": run_name, "pid": popen.pid,
-                "started_at": self._runs[run_name]["started_at"], "log_path": str(log_path)}
+                "started_at": rec["started_at"], "log_path": str(log_path)}
 
-    @staticmethod
-    def _state(popen) -> tuple[str, int | None]:
-        rc = popen.poll()
+    def _state(self, rec: dict) -> tuple[str, int | None]:
+        """(state, exit_code). Reaps the child (poll) and closes its log handle on
+        the running->terminal transition."""
+        rc = rec["popen"].poll()
         if rc is None:
             return "running", None
+        self._close_fh(rec)
         return ("finished" if rc == 0 else "failed"), rc
 
-    def status(self, run_name: str) -> dict:
-        """{run_name, state, exit_code, pid, started_at, log_path} or state='unknown'."""
-        rec = self._runs.get(run_name)
-        if rec is None:
-            return {"run_name": run_name, "state": "unknown"}
-        state, rc = self._state(rec["popen"])
+    @staticmethod
+    def _status_dict(run_name: str, rec: dict, state: str, rc: int | None) -> dict:
         return {"run_name": run_name, "state": state, "exit_code": rc,
                 "pid": rec["pid"], "started_at": rec["started_at"],
                 "log_path": rec["log_path"]}
 
+    def status(self, run_name: str) -> dict:
+        """{run_name, state, exit_code, pid, started_at, log_path} or state='unknown'."""
+        with self._lock:
+            rec = self._runs.get(run_name)
+            if rec is None:
+                return {"run_name": run_name, "state": "unknown"}
+            state, rc = self._state(rec)
+            return self._status_dict(run_name, rec, state, rc)
+
     def list(self) -> list[dict]:
         """Status of every launched run (newest first by start time)."""
-        return sorted((self.status(n) for n in self._runs),
-                      key=lambda s: s.get("started_at") or 0.0, reverse=True)
+        with self._lock:
+            snapshot = list(self._runs.items())  # snapshot under lock; build off it
+            out = [self._status_dict(name, rec, *self._state(rec))
+                   for name, rec in snapshot]
+        return sorted(out, key=lambda s: s.get("started_at") or 0.0, reverse=True)
 
     def cancel(self, run_name: str) -> dict:
         """Terminate a running child (TERM, then KILL after 5s). Idempotent."""
-        rec = self._runs.get(run_name)
+        with self._lock:
+            rec = self._runs.get(run_name)
+            state = self._state(rec)[0] if rec is not None else "unknown"
         if rec is None:
             return {"run_name": run_name, "cancelled": False, "state": "unknown"}
-        state, _ = self._state(rec["popen"])
         if state != "running":
             return {"run_name": run_name, "cancelled": False, "state": state}
+        # terminate/wait OUTSIDE the lock so a slow shutdown doesn't block other clients
         rec["popen"].terminate()
         try:
             rec["popen"].wait(timeout=5)
         except subprocess.TimeoutExpired:
             rec["popen"].kill()
+        self._close_fh(rec)
         return {"run_name": run_name, "cancelled": True, "state": "failed"}
 
     def tail(self, run_name: str, since_line: int = 0, max_lines: int = 200) -> dict:
         """Incremental log lines from `since_line`. The panel passes back next_line."""
-        rec = self._runs.get(run_name)
+        with self._lock:
+            rec = self._runs.get(run_name)
         if rec is None:
             return {"run_name": run_name, "lines": [], "next_line": int(since_line),
                     "total_lines": 0}

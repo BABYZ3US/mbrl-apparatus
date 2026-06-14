@@ -129,12 +129,28 @@ def make(type_: str, data: dict, id_: int = 0) -> dict:
     return {"type": type_, "id": id_, "data": data}
 
 
+# Incoming frames are tiny JSON requests; cap the length prefix so a desynced or
+# hostile stream can't pin unbounded memory waiting for bytes that never come.
+MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+
+def _is_number(v) -> bool:
+    """True for a real numeric metric value (bool is NOT a number here)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 class FrameDecoder:
     """Accumulates raw bytes and yields whole length-prefixed frames.
 
     The clean recv loop the Bridge uses (bridge.gd `_drain`): feed it whatever
     `recv()` returned, pull out every complete '<I'-prefixed frame, keep the
     partial tail buffered for the next chunk.
+
+    Robustness: a frame whose body is not valid UTF-8 JSON is SKIPPED (logged),
+    not raised — a single corrupt/desynced frame must never tear down the client
+    connection (the studio just sees that request silently dropped). A length
+    prefix over MAX_FRAME_BYTES means the stream is desynced/hostile and is
+    unrecoverable, so it raises (the caller closes the connection).
     """
 
     def __init__(self) -> None:
@@ -147,11 +163,18 @@ class FrameDecoder:
             if len(self._buf) < 4:
                 return
             (n,) = struct.unpack("<I", self._buf[:4])
+            if n > MAX_FRAME_BYTES:
+                raise ValueError(f"frame length {n} exceeds MAX_FRAME_BYTES "
+                                 f"({MAX_FRAME_BYTES}) — stream desynced")
             if len(self._buf) < 4 + n:
                 return
             payload = bytes(self._buf[4:4 + n])
             del self._buf[:4 + n]
-            yield json.loads(payload.decode("utf-8"))
+            try:
+                yield json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                _log("frame.bad_json", error=repr(exc), nbytes=n)
+                continue  # skip the corrupt frame, keep the connection alive
 
 
 # ---------------- viz scanning (read-only over results / checkpoints) --------
@@ -182,12 +205,17 @@ def _read_metric_jsonl(results_dir: Path, run: str, key: str,
         for row in _read_rows(m):
             if key in row:
                 step = row.get("env_steps", row.get("step"))
-                if step is not None:
-                    s = float(step)
-                    if since is not None and s <= float(since):
-                        continue
-                    steps.append(s)
-                    values.append(float(row[key]))
+                val = row[key]
+                # Skip non-numeric values (e.g. eval/video logs a string) and
+                # non-numeric steps — float() on those would raise and (pre-fix)
+                # crash pull.metric. Mirrors RunIndex.get_metric's _is_number guard.
+                if not _is_number(step) or not _is_number(val):
+                    continue
+                s = float(step)
+                if since is not None and s <= float(since):
+                    continue
+                steps.append(s)
+                values.append(float(val))
     return {"run": run, "key": key, "steps": steps, "values": values}
 
 
@@ -631,11 +659,24 @@ class StudioBridgeServer:
                     if not chunk:
                         break  # peer closed
                     for msg in decoder.feed(chunk):
-                        reply = self.dispatch(msg)
                         _log("rx", type=msg.get("type"), id=msg.get("id"))
+                        # A buggy/edge-case handler must NEVER drop the connection:
+                        # convert any dispatch exception into a framed ERROR reply so
+                        # the studio's pending callback resolves and the socket lives.
+                        try:
+                            reply = self.dispatch(msg)
+                        except Exception as exc:  # noqa: BLE001
+                            _log("dispatch.error", peer=str(addr),
+                                 type=msg.get("type"), error=repr(exc))
+                            reply = make(ERROR,
+                                         {"code": "server_error",
+                                          "message": f"{msg.get('type')}: {exc}"},
+                                         int(msg.get("id", 0)) if isinstance(msg.get("id"), int) else 0)
                         conn.sendall(frame(reply))
         except (ConnectionError, OSError) as exc:
             _log("client.error", peer=str(addr), error=repr(exc))
+        except Exception as exc:  # noqa: BLE001 — a framing/decoder fault closes THIS client, not the server
+            _log("client.fatal", peer=str(addr), error=repr(exc))
         finally:
             _log("client.disconnected", peer=str(addr))
 

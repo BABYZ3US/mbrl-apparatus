@@ -145,6 +145,37 @@ def test_spectral_resume_bitwise_identical(tmp_path):
         assert m_resumed[k] == pytest.approx(m_ref[k], rel=1e-6), k
 
 
+def test_spectral_snr_generator_and_ema_survive_resume(tmp_path):
+    """The SNR split-half generator AND the per-head Wiener-weight EMA must round-trip
+    through a checkpoint. They were missing from state_dict, so a resumed spectral run
+    re-seeded the generator (drawing a different split-half permutation on the next
+    refit) and restarted the EMA from None (a silent reward discontinuity in snr mode).
+    The bitwise-resume test above doesn't catch it because its compared step doesn't
+    refit, so it never re-consumes the generator."""
+    cfg = make_cfg(weights_mode="snr", snr_bands=4, snr_ema=0.5,
+                   sigma_w=[0.25, 0.5, 1.0, 2.0])
+    t1 = Trainer(cfg, obs_dim=3, action_dim=1)
+    for i in range(8):  # advance past a refit: generator consumed, EMA populated
+        t1.model_update(fake_batch(seed=300 + i))
+    assert t1.spec_refits >= 1 and t1.spec_snr_ema[0] is not None
+    gen_at_save = t1.spec_snr_gen.get_state().clone()
+    ema_at_save = [x.clone() if x is not None else None for x in t1.spec_snr_ema]
+
+    cm = CheckpointManager(tmp_path, OmegaConf.to_container(cfg), every=10)
+    cm.save(t1, env_steps=800, tag="step8")
+
+    t2 = Trainer(cfg, obs_dim=3, action_dim=1)
+    cm2 = CheckpointManager(tmp_path, OmegaConf.to_container(cfg), every=10)
+    assert cm2.resume(t2) == 800
+    # generator restored bit-for-bit (a fresh Trainer re-seeds to seed+777, which differs)
+    assert torch.equal(t2.spec_snr_gen.get_state(), gen_at_save)
+    # Wiener-weight EMA restored per head
+    for got, want in zip(t2.spec_snr_ema, ema_at_save):
+        assert (got is None) == (want is None)
+        if want is not None:
+            assert torch.equal(got.cpu(), want.cpu())
+
+
 def test_policy_gradients_flow_through_spectral_reward():
     torch.manual_seed(0)
     t = Trainer(make_cfg(), obs_dim=3, action_dim=1)
