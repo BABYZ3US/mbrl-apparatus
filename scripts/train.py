@@ -214,7 +214,10 @@ def main(cfg: DictConfig):
               f"loss/total={metrics.get('loss/total', float('nan')):.4f} "
               f"eval={metrics.get('eval/return', '-')} "
               f"({_time.perf_counter() - _t_run:.0f}s elapsed)", flush=True)
-        ckpt.maybe_save(trainer, env_steps)
+        # pass the eval return (present only on eval iters) so the "best"
+        # checkpoint is retained on every new-best eval — keeps the PEAK policy
+        # even when training later collapses (PM 2026-06-13).
+        ckpt.maybe_save(trainer, env_steps, metrics.get("eval/return"))
 
     ckpt.save(trainer, env_steps, tag=f"step{trainer.step}")
     env.close()
