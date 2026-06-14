@@ -212,6 +212,62 @@ def shrink_coefs(sr: "SpectralReward", X: Tensor, y: Tensor,
     return sr
 
 
+def svd_shrink_fit(sr: "SpectralReward", X: Tensor, y: Tensor,
+                   lam: float = 1.0, kappa: float = 1.0) -> "SpectralReward":
+    """Run-12B (research cycle 2) — the THEORETICALLY CORRECT form of candidate
+    B: Donoho–Johnstone shrinkage in the orthonormal Phi-SVD basis (adaptive
+    TSVD / Rosasco spectral filtering).
+
+    shrink_coefs (candidate B) soft-thresholded the ridge coefficients in the
+    CORRELATED RFF basis and rang — cancellation pairs everywhere, zeroing one
+    side leaves the partner ringing (tests/test_spectral.py pins MSE x3000).
+    DJ near-minimaxity REQUIRES an orthonormal basis. The economy SVD of the
+    design supplies one directly:
+
+        Phi = U S V^T,    U (N, r) orthonormal columns.
+
+    Because U is orthonormal, beta = U^T y carries the SAME iid target noise per
+    component (var sigma^2) — the precise setting DJ's universal threshold
+    assumes (Donoho–Johnstone 1994). Reconstruction uses a Rosasco
+    spectral-filter g(s) on the singular values (Tikhonov / Landweber / TSVD are
+    the standard family; MIT 9.520 spectral-regularization): here the Tikhonov
+    filter s/(s²+lam), which damps small-s directions by construction, so the
+    fit is STABLE at any conditioning (the penalty-whitening route blows up when
+    poly weights -> 0 and is deliberately avoided).
+
+    Procedure:
+      1. economy SVD of the (ladder) RFF design Phi = U S V^T;
+      2. project beta = U^T y (orthonormal basis -> iid noise);
+      3. soft-threshold at the universal threshold tau = kappa · sigma_hat ·
+         sqrt(2 log r), sigma_hat = MAD of the noise-dominated (small-s) tail /
+         0.6745 (the standard DJ finest-scale estimate; 0.6745 = 0.75-quantile
+         of the standard normal);
+      4. reconstruct  c = V · diag(s/(s²+lam)) · softthresh(beta, tau).
+
+    kappa=0 (tau=0) reproduces the scalar Tikhonov ridge
+    (Phi^T Phi + lam I)^{-1} Phi^T y up to float32 roundoff — so the arm nests
+    a clean spectral-filter baseline and the validation sweep can fall back to
+    no shrinkage. The candidate's hypothesis: DJ adaptivity in the orthonormal
+    frame (the corrected B) generalizes better than (or matches, parameter-
+    lighter) the hand-tuned poly-band champion recipe. Shares the calibrated
+    sigma ladder with champion; supervised harness only (svd_shrink_test.py)
+    until/unless it ships."""
+    X = torch.as_tensor(X, dtype=torch.float32, device=sr.device)
+    y = torch.as_tensor(y, dtype=torch.float32, device=sr.device)
+    with torch.no_grad():
+        Phi = sr.features(X)                                   # (N, M)
+        U, s, Vh = torch.linalg.svd(Phi, full_matrices=False)  # U (N,r) orthonorm
+        beta = U.transpose(-2, -1) @ y                         # iid-noise coeffs
+        r = beta.shape[0]
+        tail = beta[r // 2:].abs()                             # smallest-s = noise
+        sigma_hat = (tail.median() / 0.6745) if tail.numel() else beta.new_tensor(0.)
+        tau = float(kappa) * sigma_hat * math.sqrt(2.0 * math.log(max(r, 2)))
+        beta_th = torch.sign(beta) * (beta.abs() - tau).clamp_min(0.0)
+        filt = s / (s.pow(2) + float(lam))                     # Tikhonov filter
+        sr.c = Vh.transpose(-2, -1) @ (filt * beta_th)
+    return sr
+
+
 def snr_band_weights(Phi: Tensor, y: Tensor, omega_norms: Tensor,
                      n_bands: int = 8, snr_clip: tuple = (1e-3, 1e3),
                      generator: "torch.Generator | None" = None):

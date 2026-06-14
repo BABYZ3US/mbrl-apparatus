@@ -224,3 +224,37 @@ def test_shrink_coefs_rings_in_correlated_basis():
     mse_after = torch.mean((sr.predict(X) - y_clean) ** 2).item()
     assert nz < 256                       # it does shrink...
     assert mse_after > mse_before * 2     # ...and RINGS: the documented failure
+
+
+def test_svd_shrink_does_not_ring_and_reduces_to_ridge():
+    """Run-12B (cycle 2): DJ shrinkage in the orthonormal Phi-SVD basis is the
+    corrected candidate B (adaptive TSVD / Rosasco spectral filtering). SAME
+    correlated-RFF problem as the ringing test above. Two guarantees:
+    (a) kappa=0 reproduces the scalar Tikhonov ridge (Phi'Phi + lam I)^-1 Phi'y
+    exactly (up to float32 SVD-vs-solve roundoff) — the arm nests a clean
+    spectral-filter baseline; (b) at the DJ universal threshold it does NOT
+    ring — U is orthonormal by construction, so the cancellation-pair failure
+    that destroys shrink_coefs cannot occur, and the Tikhonov filter s/(s²+lam)
+    bounds small-singular-value amplification."""
+    from mbrl.models.spectral import svd_shrink_fit
+
+    g = torch.Generator().manual_seed(0)
+    X = torch.randn(2048, 3, generator=g)
+    y_clean = torch.sin(X[:, 0])
+    y = y_clean + 1.0 * torch.randn(len(X), generator=g)
+    sr = SpectralReward(3, 256, [0.5, 1.0], seed=0)
+    Phi = sr.features(X)
+
+    # (a) kappa=0 == scalar Tikhonov ridge
+    lam = 1.0
+    c_ridge = torch.linalg.solve(Phi.T @ Phi + lam * torch.eye(256), Phi.T @ y)
+    sr0 = SpectralReward(3, 256, [0.5, 1.0], seed=0)
+    svd_shrink_fit(sr0, X, y, lam=lam, kappa=0.0)
+    assert (sr0.c - c_ridge).norm() / c_ridge.norm() < 1e-2
+
+    # (b) DJ universal threshold in the SVD basis: bounded, no ringing
+    sr.fit(X, y, weights=1e-3 * sr.w4)
+    mse_before = torch.mean((sr.predict(X) - y_clean) ** 2).item()
+    svd_shrink_fit(sr, X, y, lam=1.0, kappa=1.0)
+    mse_after = torch.mean((sr.predict(X) - y_clean) ** 2).item()
+    assert mse_after < mse_before * 2     # contrast: shrink_coefs blows up >1000x

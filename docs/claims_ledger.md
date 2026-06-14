@@ -307,6 +307,36 @@ score feature sampling (Bach 2017 line), shrinkage in the Φ-SVD basis
 (adaptive TSVD / Rosasco spectral filtering — the theoretically correct
 form of B).
 
+**Run 12B (2026-06-14, PRE-REGISTERED before results — research cycle 2,
+the corrected candidate B): shrinkage in the Φ-SVD basis (adaptive TSVD /
+Rosasco spectral filtering).** Candidate B (Donoho–Johnstone universal-
+threshold shrinkage, `shrink_coefs`) was dropped pre-run because DJ near-
+minimaxity requires an ORTHONORMAL basis and the correlated RFF basis rings
+(tests/test_spectral.py pins MSE ×3000 — cancellation pairs). The cycle-2
+fix, named in the queue above: do the shrinkage in the orthonormal basis the
+problem actually provides — the economy SVD of the RFF design Φ = U S Vᵀ.
+U is orthonormal, so β = Uᵀy carries iid target noise per component (the
+exact DJ setting), and reconstruction uses a Rosasco spectral filter on the
+singular values (here the Tikhonov filter s/(s²+λ), which damps small-s
+directions by construction — stable at any conditioning; the penalty-
+whitening route was tried and rejected for blowing up when poly weights → 0).
+Web-searched first: Rosasco spectral-filtering family (MIT 9.520 class07;
+Wikipedia "Regularization by spectral filtering" — Tikhonov/Landweber/TSVD
+as filters g(s)); Donoho–Johnstone 1994 universal threshold τ = σ√(2 log n),
+MAD/0.6745 noise estimate. Implementation: `spectral.svd_shrink_fit`
+(kappa=0 ≡ scalar Tikhonov ridge, verified in tests/test_spectral.py;
+kappa=1 = DJ universal threshold). Arms on the calibrated champion form
+(cal_low ladder, run-6 smooth+resonant targets, n∈{512,2048}×5 seeds×2
+targets = 20 cells): champion (poly-band ridge sweep, SHAPES×LAMS=12) vs
+svd_shrink (SVD spectral filter, LAMS×KAPPAS=12 — MATCHED budget; kappas
+0/1/2). Harness: `scripts/svd_shrink_test.py` (sha-scoped, chunked --budget,
+resumable). PRE-REGISTERED CRITERIA (ledger default bar, fixed before any
+cell ran): svd_shrink ships iff it beats champion in a MAJORITY of the 20
+cells, mean relative test-MSE > +2%, worst cell > −20%. FALSIFIER: bar not
+cleared ⇒ NOT SUPPORTED; the corrected candidate B is closed (4th
+orthonormal-frame instance: runs 4, 6/8, 12, 12B) and cycle 2 moves to
+leverage-score feature sampling. RESULTS: pending.
+
 **Runs 10–11 (2026-06-08, PRE-REGISTERED — the VAE/transformer generation,
 user-proposed).**
 - **Run 10 — VAE encoder (`vae_ablation` preset: champ-vae vs champion-ctl,
