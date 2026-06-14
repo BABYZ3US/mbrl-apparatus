@@ -169,6 +169,8 @@ class Trainer:
             self.frame_target_rank = int(_rf.get("target_rank", 2))
             self.frame_w_shell = float(_rf.get("w_shell", 0.0) or 0.0)   # cf10 two-sided shell
             self.frame_shell_target = float(_rf.get("shell_target", 1.0))
+            self.frame_w_logdet = float(_rf.get("w_logdet", 0.0) or 0.0)  # cf12 KL/log-det cond barrier
+            self.frame_logdet_eps = float(_rf.get("logdet_eps", 1e-2))
             if self.frame_enabled and self.frame_energy_mode == "contractive" \
                     and self.dual.mode != "twin":
                 raise ValueError("rank2_frame.energy_mode=contractive needs "
@@ -606,7 +608,7 @@ class Trainer:
         carry grad (it is the live encoder output). Returns (loss_term, metrics)."""
         from ..regularization.rank2_frame import (axis_cos2, rank2_tail_penalty,
                                                    lyapunov_grounding, contractive_axis_in_d,
-                                                   spectral_shell_penalty)
+                                                   spectral_shell_penalty, log_det_barrier)
         dl = self.dual
         metrics = {}
         term = z.new_zeros(())
@@ -639,6 +641,11 @@ class Trainer:
             shell = spectral_shell_penalty(z, self.frame_target_rank, self.frame_shell_target)
             term = term + self.frame_w_shell * shell
             metrics["frame/shell"] = float(shell.detach())
+        # cf12 log-det / KL volume barrier: push eigenvalues off zero -> bound cond(G)
+        if self.frame_w_logdet > 0.0:
+            ld = log_det_barrier(z, self.frame_logdet_eps)
+            term = term + self.frame_w_logdet * ld
+            metrics["frame/logdet_barrier"] = float(ld.detach())
         # lyapunov grounding: the autonomous drift must descend E
         if (self.frame_energy_mode == "lyapunov" and self.energy is not None
                 and self.frame_w_lyap > 0.0):

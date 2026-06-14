@@ -104,6 +104,22 @@ def spectral_shell_penalty(z: Tensor, target_rank: int = 2, target: float = 1.0)
     return shell
 
 
+def log_det_barrier(z: Tensor, eps: float = 1e-2) -> Tensor:
+    """Log-determinant volume barrier on the representation's Gram (PM 2026-06-14 — the
+    KL / Gaussian-prior spectrum term):  −mean ln(λ_i + eps).
+
+    Minimizing it MAXIMIZES the log-volume Σ ln(λ_i+eps), pushing every eigenvalue AWAY
+    from zero — the canonical anti-singularity / anti-collapse regularizer (the spectrum
+    part of KL(N(0,Σ)‖N(0,I)); MCR2's 'total coding rate'). It bounds cond(G)=λ_max/λ_min:
+    paired with the rank-k shell (which pushes the TAIL down), the tail settles at a small
+    floor ~sqrt(w_logdet/(2·w_shell)) instead of going to 0, so cond stops blowing up,
+    tunably via w_logdet. `eps` is the ridge that keeps the barrier soft (push ~1/eps at 0)."""
+    zc = z - z.mean(0, keepdim=True)
+    cov = (zc.transpose(-1, -2) @ zc) / max(zc.shape[0], 1)
+    ev = torch.linalg.eigvalsh(cov.float()).clamp_min(0.0)
+    return -(ev + eps).log().mean()
+
+
 def lyapunov_grounding(energy: EnergyHead, op_d, d: Tensor, action_dim: int) -> Tensor:
     """Ground E as an energy of the dynamics: the AUTONOMOUS (zero-action) drift must
     not increase it. relu(E(d_auto) − E(d)) → 0, with d_auto detached so the grounding

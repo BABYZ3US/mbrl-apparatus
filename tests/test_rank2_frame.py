@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from mbrl.models.dynamics import OperatorDynamics
 from mbrl.regularization.rank2_frame import (EnergyHead, axis_cos2, rank2_tail_penalty,
                                              lyapunov_grounding, contractive_axis_in_d,
-                                             dissipativity_penalty, spectral_shell_penalty)
+                                             dissipativity_penalty, spectral_shell_penalty,
+                                             log_det_barrier)
 from mbrl.training import Trainer
 from mbrl.utils.checkpoint import CheckpointManager
 from mbrl.utils.seeding import seed_everything
@@ -81,6 +82,27 @@ def test_shell_wires_into_model_update():
     t = Trainer(cfg, obs_dim=3, action_dim=2)
     m = t.model_update(_batch())
     assert "frame/shell" in m and math.isfinite(m["frame/shell"])
+    assert math.isfinite(m["loss/total"])
+
+
+def test_log_det_barrier_penalizes_singular():
+    """The KL/log-det barrier is high for a near-singular (rank-1) Gram and low for a
+    well-conditioned one — minimizing it pushes eigenvalues off zero (bounds cond)."""
+    g = torch.Generator().manual_seed(0)
+    z_iso = torch.randn(2048, 4, generator=g)
+    z_sing = torch.randn(2048, 1, generator=g) @ torch.randn(1, 4, generator=g)   # rank-1
+    assert log_det_barrier(z_sing).item() > log_det_barrier(z_iso).item()
+    assert math.isfinite(log_det_barrier(z_sing).item())
+
+
+def test_logdet_wires_into_model_update():
+    seed_everything(0)
+    cfg = _cfg(energy_mode="lyapunov")
+    cfg.model.dual_latent.rank2_frame.w_shell = 1.0
+    cfg.model.dual_latent.rank2_frame.w_logdet = 0.05
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    m = t.model_update(_batch())
+    assert "frame/logdet_barrier" in m and math.isfinite(m["frame/logdet_barrier"])
     assert math.isfinite(m["loss/total"])
 
 

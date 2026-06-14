@@ -102,6 +102,12 @@ model:
                         # explode. Replaces the dissipativity (which only saw growth) and
                         # the one-sided rank2_tail (which permitted rank-1). 0 = off.
       shell_target: 1.0 # the per-mode eigenvalue setpoint the shell holds the top-k at.
+      w_logdet: 0.0     # cf12 (PM 2026-06-14): log-det / KL volume barrier −mean ln(λ_i+eps)
+                        # on the Gram — the spectrum term of KL(N(0,Σ)‖N(0,I)). Pushes every
+                        # eigenvalue OFF zero -> bounds cond(G)=λ_max/λ_min (which the rank-2
+                        # shell otherwise sends to ∞ as the tail→0). Paired with w_shell the
+                        # tail settles at a small floor instead of 0. 0 = off.
+      logdet_eps: 0.01  # ridge inside the log (soft barrier; push strength ~1/eps near 0).
       balance: false    # cf7 (PM 2026-06-14): equilibrium-couple the alignment (couple)
                         # and energy (dissipativity) penalties — normalize each by its
                         # running magnitude before summing so neither outweighs the other
