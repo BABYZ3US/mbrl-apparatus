@@ -129,6 +129,37 @@ def test_skip_nonfinite_protects_model_weights(monkeypatch):
     assert t._nonfinite_skips >= 1
 
 
+def test_gram_readouts_track_representation_collapse():
+    """The order-parameter readout: a rank-1 (collapsed) representation gives
+    eff_rank≈1 and a huge cond(G); an isotropic full-rank one gives eff_rank≈k and
+    cond(G)≈1. This is the live distance-to-collapse signal."""
+    seed_everything(0)
+    t = Trainer(_cfg(), obs_dim=3, action_dim=2)
+    k = t.encoder.latent_dim
+    # collapsed: every sample a scalar multiple of one direction (defects proliferated)
+    v = torch.randn(1, k)
+    z_collapsed = torch.randn(64, 1) * v
+    r1 = t._representation_readouts(z_collapsed)
+    assert r1["latent/gram_eff_rank"] < 1.5
+    assert r1["latent/gram_cond"] > 1e3
+    # coherent: isotropic full-rank representation
+    z_full = torch.randn(4096, k)
+    r2 = t._representation_readouts(z_full)
+    assert r2["latent/gram_eff_rank"] > 0.7 * k
+    assert r2["latent/gram_cond"] < r1["latent/gram_cond"]
+    for r in (r1, r2):
+        assert all(math.isfinite(x) for x in r.values())
+
+
+def test_readouts_and_phase_drift_logged():
+    """gram_* readouts logged in BOTH paths; dual/phase_drift only for twin."""
+    seed_everything(0)
+    t = Trainer(_cfg(mode="twin", couple_weight=0.1), obs_dim=3, action_dim=2)
+    m = t.model_update(_batch())
+    assert {"latent/gram_cond", "latent/gram_eff_rank", "latent/gram_spectral_entropy"} <= set(m)
+    assert "dual/phase_drift" in m and 0.0 <= m["dual/phase_drift"]
+
+
 def test_resume_bitwise_with_stabilization(tmp_path):
     """skip-counter is checkpointed; full stabilized config resumes bitwise-exact."""
     cfg = _cfg(mode="twin", radius_p=0.1, reward_clip=10.0, return_clip=100.0,

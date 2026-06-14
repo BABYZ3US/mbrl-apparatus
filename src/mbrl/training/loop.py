@@ -528,6 +528,29 @@ class Trainer:
                               extent=extent, path=path,
                               step=self.step if step is None else step, run=run)
 
+    # ---------------- order-parameter / distance-to-collapse readout ----------------
+    @torch.no_grad()
+    def _representation_readouts(self, z: torch.Tensor) -> dict:
+        """Superconductor-analogy diagnostics on the latent representation's Gram
+        (PM 2026-06-14). The batch covariance G = Zc^T Zc / B is the order-parameter
+        amplitude: as the coherent state depins (singular-Gram defects proliferate),
+        eigendirections of G vanish → cond(G)=λ_max/λ_min → ∞ and eff_rank → 1. These
+        are a LIVE distance-to-collapse readout the operator-spectrum metrics don't
+        capture (that is the OPERATOR A; this is the representation z). The cf3 NaN
+        had no representation-level early warning logged — this fills that gap.
+        Intuition/diagnostic only (finite net ⇒ a driven bifurcation, NOT a sharp
+        thermodynamic transition — no universal exponents implied). Cheap k×k eigh,
+        no_grad — never differentiated, so it cannot perturb training."""
+        zc = z - z.mean(0, keepdim=True)
+        G = (zc.transpose(-1, -2) @ zc) / max(zc.shape[0], 1)      # (k,k) PSD covariance
+        ev = torch.linalg.eigvalsh(G.float()).clamp_min(0.0)       # ascending eigenvalues
+        tot = ev.sum().clamp_min(1e-12)
+        p = (ev / tot).clamp_min(1e-12)
+        spectral_entropy = float(-(p * p.log()).sum())
+        return {"latent/gram_cond": float(ev[-1] / ev[0].clamp_min(1e-12)),  # σmax/σmin
+                "latent/gram_eff_rank": float(torch.exp(torch.as_tensor(spectral_entropy))),
+                "latent/gram_spectral_entropy": spectral_entropy}
+
     # ---------------- model learning ----------------
     def model_update(self, batch) -> dict:
         if self.dual_latent:
@@ -842,7 +865,8 @@ class Trainer:
                "penalty/value": pen_val, "penalty/lambda": lam_t,
                "penalty/return_gate": self.rg_gate_now,
                "loss/total": loss.item(), "step": self.step, **spec_metrics,
-               **dyn_calib, **dg_metrics, **info_metrics, **op_metrics}
+               **dyn_calib, **dg_metrics, **info_metrics, **op_metrics,
+               **self._representation_readouts(z)}
         if self.lam0_auto is not None:
             out["penalty/lam0_auto"] = self.lam0_auto
         return out
@@ -1114,6 +1138,11 @@ class Trainer:
                 cpl = dl.couple(d, p)
                 loss = loss + self.couple_w * cpl
                 dual_metrics["dual/couple"] = cpl.item()
+            with torch.no_grad():   # relative-phase drift: scale-free desync of the two
+                cd, cp = dl.Wd(d), dl.Wp(p)   # sectors (0 = phase-locked, →1 slipping out).
+                denom = 0.5 * (cd.norm(dim=-1) + cp.norm(dim=-1)) + 1e-6   # phase stiffness
+                dual_metrics["dual/phase_drift"] = float(   # readout (couple_w raises it)
+                    ((cd - cp).norm(dim=-1) / denom).mean())
 
         self.model_opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -1140,7 +1169,7 @@ class Trainer:
                "penalty/return_gate": self.rg_gate_now,
                "loss/total": loss.item(), "step": self.step,
                "latent/z_std": z.detach().std(0).mean().item(),
-               **op_metrics, **dual_metrics}
+               **op_metrics, **dual_metrics, **self._representation_readouts(z)}
         if vae_metrics is not None:
             out |= vae_metrics
         return out
