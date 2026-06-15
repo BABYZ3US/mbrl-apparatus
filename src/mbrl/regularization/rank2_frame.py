@@ -133,6 +133,11 @@ def spectral_band_penalty(z: Tensor, ceiling: float = 1.0, floor: float = 0.1,
                  β·σ(1−σ) peaks AT the floor (β/4, binds) and vanishes on BOTH sides (weak
                  far-field pull-back). Mirror tradeoff to relu1 (unbounded penalty / constant
                  lift). β = sharpness.
+      • 'gelu'     Φ=gelu(β·d)/β   smooth-hinge cousin of softplus (lift 0.5 at floor ⇒ binds),
+                 with GELU's slight negative dip just inside the band. Fine-tuning lever.
+      • 'leaky_relu' Φ=leaky_relu(d, 0.1)   relu1 with a 0.1 leak above the floor: full lift
+                 below (binds, hard-ish edge) + a small constant up-bias on band modes
+                 (a mild anti-compression / trace push). Fine-tuning lever.
     (relu2 ⇒ byte-identical to the original two-sided band.)"""
     zc = z - z.mean(0, keepdim=True)
     cov = (zc.transpose(-1, -2) @ zc) / max(zc.shape[0], 1)
@@ -148,8 +153,12 @@ def spectral_band_penalty(z: Tensor, ceiling: float = 1.0, floor: float = 0.1,
         floor_term = (nn.functional.softplus(floor_beta * d) / floor_beta).sum()
     elif floor_shape == "sigmoid":
         floor_term = torch.sigmoid(floor_beta * d).sum()     # SATURATING: bounded in [0,k]
+    elif floor_shape == "gelu":
+        floor_term = (nn.functional.gelu(floor_beta * d) / floor_beta).sum()   # smooth hinge w/ slight dip
+    elif floor_shape in ("leaky_relu", "leaky"):
+        floor_term = nn.functional.leaky_relu(d, 0.1).sum()  # relu1 + a 0.1 leak above the floor
     else:
-        raise ValueError("floor_shape must be relu2|relu1|softplus|sigmoid, got %r" % floor_shape)
+        raise ValueError("floor_shape must be relu2|relu1|softplus|sigmoid|gelu|leaky_relu, got %r" % floor_shape)
     return ceil_term + floor_term
 
 
