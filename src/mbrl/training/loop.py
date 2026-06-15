@@ -175,6 +175,8 @@ class Trainer:
             self.frame_w_band = float(_rf.get("w_band", 0.0) or 0.0)       # cf14 two-sided band
             self.frame_band_ceiling = float(_rf.get("band_ceiling", 1.0))
             self.frame_band_floor = float(_rf.get("band_floor", 0.1))
+            self.frame_band_floor_shape = str(_rf.get("band_floor_shape", "relu2"))  # cf18 floor wall
+            self.frame_band_floor_beta = float(_rf.get("band_floor_beta", 20.0))
             self.frame_w_compress = float(_rf.get("w_compress", 0.0) or 0.0)  # cf15 nuclear-norm compression
             if self.frame_enabled and self.frame_energy_mode == "contractive" \
                     and self.dual.mode != "twin":
@@ -673,7 +675,8 @@ class Trainer:
         # cf14 two-sided spectral band: bound EVERY Gram eigenvalue between a hard floor
         # and a hard ceiling, free in between -> cond bounded, rank EMERGES (no rank demand)
         if self.frame_w_band > 0.0:
-            band = spectral_band_penalty(z, self.frame_band_ceiling, self.frame_band_floor)
+            band = spectral_band_penalty(z, self.frame_band_ceiling, self.frame_band_floor,
+                                         self.frame_band_floor_shape, self.frame_band_floor_beta)
             term = term + self.frame_w_band * band
             metrics["frame/band"] = float(band.detach())
         # cf15 nuclear-norm compression Σ√(relu(λ-floor)): the inward pressure the band's

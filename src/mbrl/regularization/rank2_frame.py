@@ -107,31 +107,43 @@ def spectral_shell_penalty(z: Tensor, target_rank: int = 2, target: float = 1.0,
     return shell
 
 
-def spectral_band_penalty(z: Tensor, ceiling: float = 1.0, floor: float = 0.1) -> Tensor:
+def spectral_band_penalty(z: Tensor, ceiling: float = 1.0, floor: float = 0.1,
+                          floor_shape: str = "relu2", floor_beta: float = 20.0) -> Tensor:
     """Two-sided spectral BAND (PM 2026-06-14) — bound the Gram spectrum between a HARD
     FLOOR and a HARD CEILING, with a FREE middle, and let the RANK EMERGE inside:
 
-        band = Σ_i relu(λ_i − ceiling)²  +  Σ_i relu(floor − λ_i)²
+        band = Σ_i relu(λ_i − ceiling)²  +  Σ_i Φ(floor − λ_i)
 
-    The lesson of cf10–cf13: enforcing a hand-set rank is the wrong lever (rank-2 and
-    rank-4 both peaked-then-collapsed), and a ONE-SIDED barrier alone is vacuous — the
-    energy/dissipativity barrier only saw growth (latent contracts ⇒ inert), and the
-    log-det barrier alone only pushes eigenvalues UP (never caps them, never confines).
-    Neither CONFINES the spectrum to a band.
+    It penalizes ONLY eigenvalues that escape [floor, ceiling]; every mode inside the band
+    is free. Nothing collapses to 0 (floor wall), nothing runs away (ceiling wall), the
+    effective rank emerges between the walls (no target_rank). eigvalsh has a stable backward.
 
-    This term does. It penalizes ONLY eigenvalues that escape [floor, ceiling]; every mode
-    inside the band is free (zero gradient). So nothing collapses to 0 (the floor wall) and
-    nothing runs away (the ceiling wall) ⇒ cond(G)=λ_max/λ_min ≤ ceiling/floor is bounded —
-    but the NUMBER of active modes (how many the task pushes up to the ceiling vs leaves
-    near the floor) is chosen by the task, NOT imposed. The effective rank emerges between
-    the two hard walls. Unlike spectral_shell_penalty there is no target_rank: the floor is
-    applied to EVERY eigenvalue, not just a crushed tail. eigvalsh has a stable backward."""
+    `floor_shape` Φ (cf18, PM 2026-06-15) — the CAS finding (scripts/cas_spectral_optimum.py):
+    the floor wall's LIFT must not vanish at the floor or the deadest mode sinks and cond
+    blows up (the observed 1e7–1e12). For Φ(d)=w·d^p the lift is p·w·d^(p-1):
+      • 'relu2'  Φ=relu(d)²    lift 2·relu(d) → 0 at the floor ⇒ cond UNBOUNDED when the
+                 downward drift exceeds 2·w_band·floor. The original; kept as default.
+      • 'relu1'  Φ=relu(d)     lift = 1 (constant) below the floor, 0 above ⇒ binds at λ≈floor
+                 ⇒ cond → ceiling/floor. A HARD edge: exactly zero force inside the band.
+      • 'softplus' Φ=softplus(β·d)/β   lift = σ(β·d) (logistic) → 0.5 at the floor, →1 below,
+                 →0 above, smoothly (no kink). Binds like relu1 but C¹; bleeds a little lift
+                 just inside the band (soft shoulder). β = sharpness (→∞ recovers relu1).
+    (relu2 ⇒ byte-identical to the original two-sided band.)"""
     zc = z - z.mean(0, keepdim=True)
     cov = (zc.transpose(-1, -2) @ zc) / max(zc.shape[0], 1)
     ev = torch.linalg.eigvalsh(cov.float()).clamp_min(0.0)   # ascending eigenvalues
     above = torch.relu(ev - ceiling)                         # ceiling wall (don't run away)
-    below = torch.relu(floor - ev)                           # floor wall (don't collapse)
-    return (above * above).sum() + (below * below).sum()
+    ceil_term = (above * above).sum()
+    d = floor - ev                                           # >0 below the floor
+    if floor_shape == "relu2":
+        below = torch.relu(d); floor_term = (below * below).sum()
+    elif floor_shape == "relu1":
+        floor_term = torch.relu(d).sum()
+    elif floor_shape == "softplus":
+        floor_term = (nn.functional.softplus(floor_beta * d) / floor_beta).sum()
+    else:
+        raise ValueError("floor_shape must be relu2|relu1|softplus, got %r" % floor_shape)
+    return ceil_term + floor_term
 
 
 def spectral_compress_penalty(z: Tensor, floor: float = 0.0, eps: float = 1e-2) -> Tensor:

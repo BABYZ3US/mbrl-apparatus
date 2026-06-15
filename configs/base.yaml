@@ -123,6 +123,12 @@ model:
       band_floor: 0.1   # lower wall: per-mode eigenvalue is free above this, penalized below
                         # (anti-collapse). cond is bounded by band_ceiling/band_floor; lower
                         # floor ⇒ more room for the rank to emerge (wider band).
+      band_floor_shape: relu2  # cf18 (PM 2026-06-15): floor-wall shape. relu2 = relu(d)² (lift
+                        # vanishes at the floor ⇒ cond unbounded if drift>2·w_band·floor — the
+                        # CAS root cause of the live 1e7-1e12). relu1 = relu(d) (constant lift,
+                        # hard edge, cond→ceiling/floor). softplus = softplus(β·d)/β (smooth
+                        # logistic lift, binds without a kink, soft shoulder). d=floor−λ.
+      band_floor_beta: 20.0    # softplus sharpness (→∞ recovers relu1).
       w_compress: 0.0   # cf15 (PM 2026-06-14): nuclear-norm COMPRESSION Σ_i √λ_i — the
                         # inward pressure the band's FREE interior lacks (band-alone drifts:
                         # no gradient in the middle ⇒ no momentum to converge). √ is concave

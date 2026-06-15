@@ -160,6 +160,29 @@ def test_band_wires_into_model_update():
     assert math.isfinite(m["loss/total"])
 
 
+def test_band_floor_shape_lift_below_floor():
+    """relu1 / softplus floor walls penalize below-floor modes far harder than relu2 (whose
+    lift vanishes at the floor) — the cond-binding fix (CAS, cf18). softplus >= relu1 >> relu2."""
+    g = torch.Generator().manual_seed(3)
+    z = torch.randn(4096, 6, generator=g) * torch.tensor([0.05] * 6).sqrt()   # all modes ~0.05 < floor 0.1
+    p2 = spectral_band_penalty(z, 1.0, 0.1, "relu2").item()
+    p1 = spectral_band_penalty(z, 1.0, 0.1, "relu1").item()
+    ps = spectral_band_penalty(z, 1.0, 0.1, "softplus").item()
+    assert p1 > p2 + 0.1 and ps > p2 + 0.1          # constant/saturating lift >> vanishing quadratic
+    assert all(math.isfinite(x) for x in (p1, p2, ps))
+
+
+def test_band_floor_shape_wires():
+    seed_everything(0)
+    for shape in ("relu1", "softplus"):
+        cfg = _cfg(energy_mode="lyapunov")
+        cfg.model.dual_latent.rank2_frame.w_band = 5.0
+        cfg.model.dual_latent.rank2_frame.band_floor_shape = shape
+        t = Trainer(cfg, obs_dim=3, action_dim=2)
+        m = t.model_update(_batch())
+        assert "frame/band" in m and math.isfinite(m["frame/band"]) and math.isfinite(m["loss/total"])
+
+
 def test_spectral_compress_rewards_concentration():
     """Σ√λ is LOWER for a concentrated spectrum than a spread one of EQUAL total variance
     (√ is concave) — so minimizing it rewards concentration into fewer modes (low rank)."""
