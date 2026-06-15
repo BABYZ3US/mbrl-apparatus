@@ -182,6 +182,37 @@ def test_compress_wires_into_model_update():
     assert math.isfinite(m["loss/total"])
 
 
+def test_horizon_ratchet_monotonic():
+    """cf17 ratchet: H passes through below ratchet_base, ENGAGES at the base, then never
+    falls below its running max (rises freely, drops are clamped) — stability at peak."""
+    seed_everything(0)
+    cfg = _cfg()
+    cfg.imagination.adaptive_horizon = OmegaConf.create(
+        {"enabled": True, "h_min": 5, "h_max": 25, "decay": 0.99,
+         "ratchet": True, "ratchet_base": 15})
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    assert t._horizon_ratchet(10) == 10 and t._ah_ratchet_on is False   # below base: passthrough
+    assert t._horizon_ratchet(15) == 15 and t._ah_ratchet_on is True    # reaches base: engage
+    assert t._horizon_ratchet(20) == 20                                  # rises: floor follows
+    assert t._horizon_ratchet(12) == 20                                  # drops: floor HOLDS
+    assert t._horizon_ratchet(3) == 20                                   # crash: still held
+    assert t._horizon_ratchet(25) == 25                                  # new peak: floor rises
+    assert t._horizon_ratchet(1) == 25                                   # never below the peak
+
+
+def test_horizon_ratchet_off_is_passthrough():
+    """ratchet=false (default) returns H unchanged — the original adaptive behaviour, free
+    to fall back to h_min (this is exactly what cf17 fixes)."""
+    seed_everything(0)
+    cfg = _cfg()
+    cfg.imagination.adaptive_horizon = OmegaConf.create(
+        {"enabled": True, "h_min": 5, "h_max": 25, "ratchet": False})
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    assert t._horizon_ratchet(20) == 20
+    assert t._horizon_ratchet(5) == 5      # CAN still drop (no ratchet) — the failure mode
+    assert t._ah_ratchet_on is False
+
+
 def test_axis_cos2_orthogonal_vs_parallel():
     a = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     b_orth = torch.tensor([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
