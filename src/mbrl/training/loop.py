@@ -605,9 +605,17 @@ class Trainer:
         tot = ev.sum().clamp_min(1e-12)
         p = (ev / tot).clamp_min(1e-12)
         spectral_entropy = float(-(p * p.log()).sum())
-        return {"latent/gram_cond": float(ev[-1] / ev[0].clamp_min(1e-12)),  # σmax/σmin
-                "latent/gram_eff_rank": float(torch.exp(torch.as_tensor(spectral_entropy))),
-                "latent/gram_spectral_entropy": spectral_entropy}
+        out = {"latent/gram_cond": float(ev[-1] / ev[0].clamp_min(1e-12)),  # σmax/σmin
+               "latent/gram_eff_rank": float(torch.exp(torch.as_tensor(spectral_entropy))),
+               "latent/gram_spectral_entropy": spectral_entropy}
+        # full Gram spectrum (descending; latent/eig00 = largest) — the per-eigenvalue
+        # series that turns the 3 summaries above into a time×eigenvalue heatmap / latent
+        # PCA-over-training. eig already computed ⇒ ~free. Lets analyze_loss_dynamics.py
+        # fit the closed-form spectral equilibria (active modes→ceiling, dead→floor).
+        ev_desc = ev.flip(0)
+        for i in range(ev_desc.shape[0]):
+            out["latent/eig%02d" % i] = float(ev_desc[i])
+        return out
 
     # ---------------- rank-2 reward⊥energy frame (cf5) ----------------
     def _rank2_frame(self, z, d, p, a, tau):
