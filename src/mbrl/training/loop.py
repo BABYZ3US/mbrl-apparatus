@@ -303,7 +303,11 @@ class Trainer:
         self.ah_h_min = int(ah.get("h_min", 5)) if ah else 5
         self.ah_h_max = int(ah.get("h_max", 25)) if ah else 25
         self.ah_decay = float(ah.get("decay", 0.99)) if ah else 0.99
+        self.ah_ratchet = bool(ah.get("ratchet", False)) if ah else False  # cf17 monotonic floor
+        self.ah_ratchet_base = int(ah.get("ratchet_base", 15)) if ah else 15
         self.pen_ema, self.pen_peak = None, 0.0  # checkpointed
+        self._ah_ratchet_floor = 0      # running-max H once engaged (checkpointed)
+        self._ah_ratchet_on = False     # has H reached ratchet_base yet (checkpointed)
 
         # Disagreement-gated lambda (penalty.disagreement_gate): lam(t) scaled
         # by the reward ensemble's convergence — full while heads disagree
@@ -1060,11 +1064,27 @@ class Trainer:
         if not self.ah_enabled:
             return int(self.cfg.imagination.horizon)
         if self.pen_ema is None or self.pen_peak <= 0:
-            return self.ah_h_min  # no curvature evidence yet -> conservative
+            return self._horizon_ratchet(self.ah_h_min)  # no curvature evidence yet
         frac = min(max(1.0 - self.pen_ema / max(self.pen_peak, 1e-12), 0.0), 1.0)
         if not np.isfinite(frac):  # last-ditch guard: never crash the loop
-            return self.ah_h_min
-        return int(round(self.ah_h_min + (self.ah_h_max - self.ah_h_min) * frac))
+            return self._horizon_ratchet(self.ah_h_min)
+        H = int(round(self.ah_h_min + (self.ah_h_max - self.ah_h_min) * frac))
+        return self._horizon_ratchet(H)
+
+    def _horizon_ratchet(self, H: int) -> int:
+        """cf17 monotonic horizon floor: once the adaptive H first reaches ratchet_base,
+        lock a running-max floor so H can rise but never fall below its peak again —
+        stability at peak convergence, no penalty-spike collapse. Idempotent (max-based),
+        and its state (_ah_ratchet_floor/_on) is checkpointed for bitwise resume. Off ⇒
+        returns H unchanged (the original adaptive behaviour)."""
+        if not self.ah_ratchet:
+            return H
+        if not self._ah_ratchet_on and H >= self.ah_ratchet_base:
+            self._ah_ratchet_on = True
+        if self._ah_ratchet_on:
+            self._ah_ratchet_floor = max(self._ah_ratchet_floor, H)
+            return self._ah_ratchet_floor
+        return H
 
     # ---------------- behaviour learning (Dreamer lambda-returns) ----------------
     def behaviour_update(self, z0: torch.Tensor, tau0: torch.Tensor | None = None) -> dict:
@@ -1557,6 +1577,8 @@ class Trainer:
                 "ad_pen_sum": self.ad_pen_sum,
                 # adaptive-horizon certificate state
                 "pen_ema": self.pen_ema, "pen_peak": self.pen_peak,
+                "ah_ratchet_floor": self._ah_ratchet_floor,
+                "ah_ratchet_on": self._ah_ratchet_on,
                 # disagreement-gate EMA state (bitwise resume)
                 "dis_ema": self.dis_ema, "dis_peak": self.dis_peak,
                 "spec_head_dis": self._spec_head_dis,
@@ -1626,6 +1648,8 @@ class Trainer:
         self.ad_pen_sum = sd.get("ad_pen_sum", 0.0)
         self.pen_ema = sd.get("pen_ema", None)
         self.pen_peak = sd.get("pen_peak", 0.0)
+        self._ah_ratchet_floor = sd.get("ah_ratchet_floor", 0)
+        self._ah_ratchet_on = sd.get("ah_ratchet_on", False)
         if "hutchinson_gen" in sd:  # probe RNG must resume too (bitwise resume)
             self.gen.set_state(sd["hutchinson_gen"])
         if self.spec_enabled and "spectral" in sd:

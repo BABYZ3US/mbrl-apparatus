@@ -315,6 +315,13 @@ imagination:
     h_min: 5
     h_max: 25
     decay: 0.99         # EMA decay for penalty/value tracking
+    ratchet: false      # cf17 (PM 2026-06-14): MONOTONIC non-decreasing horizon floor (a
+                        # relu/step ratchet). Once the adaptive H first reaches ratchet_base,
+                        # lock a running-max floor: H may keep climbing but can NEVER fall
+                        # below its peak again. Enforces stability at peak convergence and
+                        # forecloses the penalty-spike -> horizon-collapse failure (cf6/cf7,
+                        # where a curvature spike crashed H to h_min and the policy collapsed).
+    ratchet_base: 15    # H must first reach this before the ratchet engages (must be >1).
 
 planner:                # transformer action-sequence planner (Dreamer latent-planner)
   enabled: false        # DEFAULT OFF = the per-step MLP policy actor (unchanged)

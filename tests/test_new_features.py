@@ -154,6 +154,45 @@ def test_adaptive_horizon_disabled_uses_cfg_horizon():
     assert b["imagine/horizon"] == 5  # the plain cfg.imagination.horizon
 
 
+# ---------------- cf17 horizon ratchet (monotonic non-decreasing floor) ----------------
+def _ratchet_cfg(**ah):
+    base = {"enabled": True, "h_min": 5, "h_max": 25, "ratchet": True, "ratchet_base": 15}
+    base.update(ah)
+    return make_cfg(imagination={"adaptive_horizon": base})
+
+
+def test_horizon_ratchet_locks_running_max():
+    """Below ratchet_base the horizon passes through; once it reaches the base it locks a
+    running-max floor and can rise but never fall below its peak (anti-collapse)."""
+    t = Trainer(_ratchet_cfg(), obs_dim=3, action_dim=1)
+    assert t._horizon_ratchet(5) == 5 and not t._ah_ratchet_on   # below base: free
+    assert t._horizon_ratchet(12) == 12 and not t._ah_ratchet_on
+    assert t._horizon_ratchet(15) == 15 and t._ah_ratchet_on     # reaches base: engages
+    assert t._horizon_ratchet(20) == 20                          # climbs -> floor follows
+    assert t._horizon_ratchet(25) == 25
+    assert t._horizon_ratchet(8) == 25                           # spike down -> HELD at peak
+    assert t._horizon_ratchet(15) == 25                          # still held
+    assert t._ah_ratchet_floor == 25
+
+
+def test_horizon_ratchet_off_can_fall():
+    """ratchet=false is the original adaptive behaviour: the horizon may drop."""
+    t = Trainer(_ratchet_cfg(ratchet=False), obs_dim=3, action_dim=1)
+    assert t._horizon_ratchet(25) == 25
+    assert t._horizon_ratchet(5) == 5                            # no floor: free to fall
+
+
+def test_horizon_ratchet_state_checkpointed():
+    """The ratchet floor/engaged flags survive a checkpoint round-trip (bitwise resume)."""
+    t = Trainer(_ratchet_cfg(), obs_dim=3, action_dim=1)
+    t._horizon_ratchet(20)                                       # engage, floor=20
+    assert t._ah_ratchet_on and t._ah_ratchet_floor == 20
+    t2 = Trainer(_ratchet_cfg(), obs_dim=3, action_dim=1)
+    t2.load_state_dict(t.state_dict())
+    assert t2._ah_ratchet_on and t2._ah_ratchet_floor == 20
+    assert t2._horizon_ratchet(5) == 20                          # resumed: still holds the floor
+
+
 # ---------------- auto-dosed lambda ----------------
 def test_auto_dose_computes_finite_lam0_and_resumes_bitwise(tmp_path):
     cfg = make_cfg(penalty={"auto_dose": {"enabled": True, "target_ratio": 0.1,
