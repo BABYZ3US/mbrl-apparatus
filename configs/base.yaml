@@ -127,8 +127,10 @@ model:
                         # vanishes at the floor ⇒ cond unbounded if drift>2·w_band·floor — the
                         # CAS root cause of the live 1e7-1e12). relu1 = relu(d) (constant lift,
                         # hard edge, cond→ceiling/floor). softplus = softplus(β·d)/β (smooth
-                        # logistic lift, binds without a kink, soft shoulder). d=floor−λ.
-      band_floor_beta: 20.0    # softplus sharpness (→∞ recovers relu1).
+                        # logistic lift, binds without a kink, soft shoulder). sigmoid = σ(β·d)
+                        # (SATURATING: bounded penalty in [0,k], lift peaks at the floor and
+                        # vanishes far out — steadiest loss, weak far-field pull). d=floor−λ.
+      band_floor_beta: 20.0    # softplus/sigmoid sharpness (→∞ recovers relu1 / a hard step).
       w_compress: 0.0   # cf15 (PM 2026-06-14): nuclear-norm COMPRESSION Σ_i √λ_i — the
                         # inward pressure the band's FREE interior lacks (band-alone drifts:
                         # no gradient in the middle ⇒ no momentum to converge). √ is concave

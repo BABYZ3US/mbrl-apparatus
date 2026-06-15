@@ -128,6 +128,11 @@ def spectral_band_penalty(z: Tensor, ceiling: float = 1.0, floor: float = 0.1,
       • 'softplus' Φ=softplus(β·d)/β   lift = σ(β·d) (logistic) → 0.5 at the floor, →1 below,
                  →0 above, smoothly (no kink). Binds like relu1 but C¹; bleeds a little lift
                  just inside the band (soft shoulder). β = sharpness (→∞ recovers relu1).
+      • 'sigmoid'  Φ=σ(β·d)    the only SATURATING wall: penalty bounded in [0,1] per mode (a
+                 far-collapsed mode can't dominate the loss ⇒ steadier optimization), lift
+                 β·σ(1−σ) peaks AT the floor (β/4, binds) and vanishes on BOTH sides (weak
+                 far-field pull-back). Mirror tradeoff to relu1 (unbounded penalty / constant
+                 lift). β = sharpness.
     (relu2 ⇒ byte-identical to the original two-sided band.)"""
     zc = z - z.mean(0, keepdim=True)
     cov = (zc.transpose(-1, -2) @ zc) / max(zc.shape[0], 1)
@@ -141,8 +146,10 @@ def spectral_band_penalty(z: Tensor, ceiling: float = 1.0, floor: float = 0.1,
         floor_term = torch.relu(d).sum()
     elif floor_shape == "softplus":
         floor_term = (nn.functional.softplus(floor_beta * d) / floor_beta).sum()
+    elif floor_shape == "sigmoid":
+        floor_term = torch.sigmoid(floor_beta * d).sum()     # SATURATING: bounded in [0,k]
     else:
-        raise ValueError("floor_shape must be relu2|relu1|softplus, got %r" % floor_shape)
+        raise ValueError("floor_shape must be relu2|relu1|softplus|sigmoid, got %r" % floor_shape)
     return ceil_term + floor_term
 
 

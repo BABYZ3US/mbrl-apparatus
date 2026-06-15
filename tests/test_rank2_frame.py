@@ -168,13 +168,15 @@ def test_band_floor_shape_lift_below_floor():
     p2 = spectral_band_penalty(z, 1.0, 0.1, "relu2").item()
     p1 = spectral_band_penalty(z, 1.0, 0.1, "relu1").item()
     ps = spectral_band_penalty(z, 1.0, 0.1, "softplus").item()
-    assert p1 > p2 + 0.1 and ps > p2 + 0.1          # constant/saturating lift >> vanishing quadratic
-    assert all(math.isfinite(x) for x in (p1, p2, ps))
+    psig = spectral_band_penalty(z, 1.0, 0.1, "sigmoid").item()
+    assert p1 > p2 + 0.1 and ps > p2 + 0.1 and psig > p2 + 0.1   # non-vanishing lift >> relu2 at floor
+    assert psig <= z.shape[1] + 1e-6                # sigmoid is SATURATING: bounded by k modes
+    assert all(math.isfinite(x) for x in (p1, p2, ps, psig))
 
 
 def test_band_floor_shape_wires():
     seed_everything(0)
-    for shape in ("relu1", "softplus"):
+    for shape in ("relu1", "softplus", "sigmoid"):
         cfg = _cfg(energy_mode="lyapunov")
         cfg.model.dual_latent.rank2_frame.w_band = 5.0
         cfg.model.dual_latent.rank2_frame.band_floor_shape = shape
