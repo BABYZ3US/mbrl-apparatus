@@ -234,6 +234,39 @@ def test_reward_adapt_off_is_identity():
     assert ec == 3e-4 and fp.item() == 0.0 and cl == t.actor_clip
 
 
+def test_entropy_floor_sigmoid_catches_at_target():
+    # sigmoid floor (PM 2026-06-15): bounded penalty, lift PEAKS at the target and vanishes
+    # for a deep collapse — a catch-as-it-crosses barrier (vs relu's constant lift).
+    coef, beta, h = 0.1, 4.0, 1.0
+    t = Trainer(_ra_cfg(entropy_floor={"enabled": True, "h_high": h, "coef": coef,
+                                       "shape": "sigmoid", "beta": beta}), obs_dim=3, action_dim=1)
+    t.ret_ema = 0.0                                       # rf=0 -> target H* = h
+    def probe(Hval):
+        H = torch.tensor(float(Hval), requires_grad=True)
+        _, fp, _ = t._policy_reg(H, 1.0)
+        fp.backward()
+        return fp.item(), -float(H.grad)                 # penalty, lift (push entropy up)
+    p_at, l_at = probe(h)                                # at the target
+    p_deep, l_deep = probe(h - 20.0)                     # deep collapse (far below)
+    p_above, l_above = probe(h + 5.0)                    # above the floor
+    assert p_deep <= coef + 1e-6 and p_above < 1e-3      # penalty bounded by coef; ~0 above
+    assert abs(p_at - coef * 0.5) < 1e-6                 # at the target: coef/2
+    assert l_at > l_deep and l_at > l_above              # lift PEAKS at the target...
+    assert l_deep < 1e-3 and l_above < 1e-3              # ...and vanishes deep / above
+    assert abs(l_at - coef * beta * 0.25) < 1e-6         # coef*beta/4 at the target
+
+
+def test_entropy_floor_relu_constant_lift_deep():
+    # contrast: relu floor has CONSTANT lift = coef even for a deep collapse (it reverses it)
+    coef, h = 0.1, 1.0
+    t = Trainer(_ra_cfg(entropy_floor={"enabled": True, "h_high": h, "coef": coef,
+                                       "shape": "relu"}), obs_dim=3, action_dim=1)
+    t.ret_ema = 0.0
+    H = torch.tensor(h - 20.0, requires_grad=True)
+    _, fp, _ = t._policy_reg(H, 1.0); fp.backward()
+    assert abs(-float(H.grad) - coef) < 1e-6             # constant lift = coef, no matter how deep
+
+
 # ---------------- auto-dosed lambda ----------------
 def test_auto_dose_computes_finite_lam0_and_resumes_bitwise(tmp_path):
     cfg = make_cfg(penalty={"auto_dose": {"enabled": True, "target_ratio": 0.1,

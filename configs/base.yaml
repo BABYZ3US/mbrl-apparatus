@@ -206,6 +206,9 @@ penalty:
                         # | sigmoid — λ relaxed as return rises (relax=1-frac^p).
                         # PEAKED: bump — MAX λ at mid (return≈0 "phase transition"),
                         # released quadratically above AND below (relax=1-u²).
+                        # THRESHOLD: leaky_relu — hold λ ~rigid below mid (release rises at
+                        # the leak slope), then release sharply (linear) above mid.
+    leak: 0.1           # leaky_relu gate only: pre-knee slope (release at mid = leak).
     mid: 0.0            # return anchor: gate=full for R̄≤mid, relaxes for R̄>mid;
                         # 0 = the do-nothing boundary on HalfCheetah → distinguishes +/-
     scale: 100.0        # return units over which the gate relaxes mid→mid+scale (quadratic)
@@ -366,7 +369,11 @@ reward_adapt:           # reward-adaptive policy regularization (PM 2026-06-15):
                         # policy from collapsing before reward justifies it.
     enabled: false
     h_high: 1.0         # entropy floor at rf=0 (nats); the floor → 0 as rf → 1
-    coef: 0.01          # penalty weight on relu(H* - H)
+    coef: 0.01          # penalty weight on the floor barrier
+    shape: relu         # relu: constant lift below the floor (reverses a deep collapse,
+                        # but weak). sigmoid: bounded penalty, lift peaks AT the target then
+                        # vanishes below — a sharp catch-as-it-crosses barrier (prevention).
+    beta: 4.0           # sigmoid sharpness; lift at the target ≈ coef*beta/4 (β=4 ⇒ ≈relu)
   actor_clip_adapt:     # tighten the actor grad-clip as return rises: big policy steps while
                         # exploring, small steps at peak return (stability at convergence).
     enabled: false

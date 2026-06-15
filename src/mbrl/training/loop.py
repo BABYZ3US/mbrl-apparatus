@@ -252,6 +252,11 @@ class Trainer:
         _ef = dict(ra.get("entropy_floor", {}) or {})
         self.ra_floor_on = bool(_ef.get("enabled", False))
         self.ra_floor_h = float(_ef.get("h_high", 1.0)); self.ra_floor_coef = float(_ef.get("coef", 0.01))
+        # floor-shape (PM 2026-06-15): relu = constant lift (reverses a deep collapse but
+        # weak), sigmoid = lift peaks AT the target then vanishes below (a sharp catch-it-
+        # as-it-crosses barrier — prevents the collapse from starting; pair with sharp beta).
+        self.ra_floor_shape = str(_ef.get("shape", "relu")).lower()
+        self.ra_floor_beta = float(_ef.get("beta", 4.0))
         _ac = dict(ra.get("actor_clip_adapt", {}) or {})
         self.ra_clip_on = bool(_ac.get("enabled", False)); self.ra_clip_min = float(_ac.get("min_frac", 0.1))
         self._reward_adapt_on = self.ra_anneal or self.ra_floor_on or self.ra_clip_on
@@ -373,7 +378,8 @@ class Trainer:
         self.rg_mid = float(rg.get("mid", 0.0)) if rg else 0.0       # return midpoint (sign anchor)
         self.rg_scale = float(rg.get("scale", 100.0)) if rg else 100.0  # transition width
         self.rg_slew = float(rg.get("slew", 0.1)) if rg else 0.1     # max gate change per eval
-        self.rg_shape = str(rg.get("shape", "quadratic")) if rg else "quadratic"  # quadratic|sigmoid
+        self.rg_shape = str(rg.get("shape", "quadratic")) if rg else "quadratic"  # quad|cuberoot|sigmoid|bump|leaky_relu
+        self.rg_leak = float(rg.get("leak", 0.1)) if rg else 0.1     # leaky_relu gate: pre-knee slope
         self.rg_ratchet = bool(rg.get("ratchet", False)) if rg else False  # cf19 monotonic gate
         self.ret_ema = None      # checkpointed
         self.rg_gate_now = 1.0   # current gate factor (1.0 = disabled / full lam)
@@ -1135,7 +1141,11 @@ class Trainer:
         ent_coef = base_ent_coef * (1.0 - rf) if self.ra_anneal else base_ent_coef
         floor_pen = entropy.new_zeros(())
         if self.ra_floor_on:                       # penalize entropy below H*(rf)=h_high·(1-rf)
-            floor_pen = self.ra_floor_coef * torch.relu((self.ra_floor_h * (1.0 - rf)) - entropy)
+            gap = self.ra_floor_h * (1.0 - rf) - entropy   # >0 ⇒ entropy under the floor
+            if self.ra_floor_shape == "sigmoid":   # bounded penalty; lift peaks at the target
+                floor_pen = self.ra_floor_coef * torch.sigmoid(self.ra_floor_beta * gap)
+            else:                                  # relu: constant lift everywhere below
+                floor_pen = self.ra_floor_coef * torch.relu(gap)
         clip = self.actor_clip
         if self.ra_clip_on:                        # tighten the grad-clip as return rises
             clip = self.actor_clip * (self.ra_clip_min + (1.0 - self.ra_clip_min) * (1.0 - rf))
@@ -1572,6 +1582,16 @@ class Trainer:
             # free it when clearly good (high +) or clearly failed (deep −). Not a
             # monotone gate — heuristic, in the vein of the trace penalty (PM).
             relax = 1.0 - u * u
+        elif self.rg_shape in ("leaky_relu", "leaky"):
+            # THRESHOLD gate (piecewise-linear): hold λ ~rigid below mid (release rises
+            # only at the leak slope), then release SHARPLY (linear) above mid. Knee at
+            # the return midpoint. relax = 1 - release; release(frac): 0→leak below mid,
+            # leak→1 above mid. The sharpest monotone "hold then let go at the knee" gate.
+            frac = (u + 1.0) / 2.0                    # 0 at mid-scale, 0.5 at mid, 1 at mid+scale
+            lk = max(min(self.rg_leak, 1.0), 0.0)
+            release = (lk + (1.0 - lk) * 2.0 * (frac - 0.5) if frac >= 0.5
+                       else lk * 2.0 * frac)
+            relax = 1.0 - release
         else:
             # FULL-RANGE power gate over the band [mid-scale, mid+scale]:
             # relax = 1 - frac^p, frac = (u+1)/2 ∈ [0,1]. lambda varies smoothly with

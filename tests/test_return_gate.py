@@ -127,6 +127,24 @@ def test_bump_peaked_at_mid_symmetric():
         assert 0.1 - 1e-9 <= gate(r) <= 1.0 + 1e-9
 
 
+def test_leaky_relu_gate_threshold_hold_then_release():
+    """leaky_relu gate (PM 2026-06-15): THRESHOLD — hold λ ~rigid below mid (release
+    rises only at the leak slope), then release SHARPLY (linear) above mid. Piecewise-
+    linear, monotone; knee at the return midpoint. leak=0.1, floor=0.1."""
+    seed_everything(0)
+    leak, floor = 0.1, 0.1
+    def gate(r):
+        t = Trainer(_cfg(floor=floor, decay=0.0, mid=0.0, scale=100.0, slew=1.0,
+                         shape="leaky_relu"), obs_dim=3, action_dim=2)
+        t.rg_leak = leak
+        t.observe_return(r); return t.rg_gate_now
+    assert abs(gate(-200.0) - 1.0) < 1e-6                    # deep below mid: full λ
+    assert abs(gate(0.0) - (floor + (1 - floor) * (1 - leak))) < 1e-6  # at mid: held ~0.91
+    assert abs(gate(50.0) - 0.505) < 1e-6                    # linear release above mid (frac=.75)
+    assert abs(gate(200.0) - floor) < 1e-6                   # above mid+scale: floor
+    assert gate(-200.0) > gate(0.0) > gate(50.0) > gate(200.0)         # monotone decreasing
+
+
 def test_slew_limits_the_spike():
     """A collapse can't spike the gate: starting at 1.0, one big-positive eval can
     move the gate by at most `slew`, not jump straight to the floor."""
