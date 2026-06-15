@@ -20,10 +20,11 @@ NGPU="${NGPU:-$(nvidia-smi -L 2>/dev/null | grep -c GPU)}"
 [ "${NGPU:-0}" -lt 1 ] && NGPU=1
 JOBS="${JOBS:-$((2 * NGPU))}"
 STEPS="${STEPS:-500000}"
-SEEDS="${SEEDS:-0}"
+SEEDS="${SEEDS:-0 1 2}"
 WCS="${WCS:-0.03 0.1 0.3}"
 GATES="${GATES:-on off}"
 LATENT="${LATENT:-16}"
+HID="${HID:-512}"          # bigger nets on the A100s (was 256)
 PY=".venv/bin/python"
 mkdir -p results/gridlogs
 if [ -z "${WANDB_API_KEY:-}" ] && [ -f .wandb_key ]; then
@@ -31,7 +32,7 @@ if [ -z "${WANDB_API_KEY:-}" ] && [ -f .wandb_key ]; then
 fi
 
 # band (w_band=5, [0.1,1.0]) + fixed H=15. w_compress + return_gate.enabled set per-arm.
-BASE="model.latent_dim=${LATENT} model.dynamics=operator model.operator.structure=normal model.operator.rank=0 \
+BASE="model.latent_dim=${LATENT} model.hidden=${HID} model.dynamics=operator model.operator.structure=normal model.operator.rank=0 \
 model.operator.w_normal=0.05 model.operator.w_smooth=0.1 model.operator.w_radius=0.1 \
 model.dual_latent.enabled=true model.dual_latent.mode=twin model.dual_latent.couple_weight=0.1 \
 model.dual_latent.smooth_p=false model.dual_latent.penalize_reward=true model.dual_latent.radius_p=0.02 \

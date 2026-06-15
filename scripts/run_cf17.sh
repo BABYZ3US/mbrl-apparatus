@@ -3,10 +3,11 @@
 # (cf14-band1.0 hit +1244 resumed, ~2x the all-time best) with NO compression and NO gate.
 # cf17 keeps it pure (w_compress=0, return_gate off) and changes two things:
 #  (1) HORIZON: drop the fixed H=15; use the adaptive horizon with the new RATCHET floor
-#      (imagination.adaptive_horizon.ratchet) — H roams in [h_min=15, h_max=25] but, once it
-#      reaches ratchet_base=15, locks a running-max floor: it can climb but NEVER fall below
+#      (imagination.adaptive_horizon.ratchet) — H roams in [h_min=5, h_max=25]; once it first
+#      reaches ratchet_base=15 it locks a running-max floor: it can climb but NEVER fall below
 #      its peak. A relu/step floor that enforces stability at peak convergence and forecloses
-#      the penalty-spike -> horizon-collapse failure (cf6/cf7). Always >=15 (>1), monotone up.
+#      the penalty-spike -> horizon-collapse failure (cf6/cf7). Pre-engagement it may dip to 5
+#      (>1); post-engagement it is monotone non-decreasing (>=15).
 #  (2) BAND PARAMETERS: sweep band_ceiling {0.99, 1.0} (the '0.99/1 hard energy bound' — does
 #      pinning eigenvalues just under 1 give the cleaner low-amplitude-near-0 band residual?)
 #      x w_band {1.0, 2.0} (1.0 = the cf14 winner; 2.0 = a harder wall). band_floor=0.1.
@@ -24,10 +25,11 @@ NGPU="${NGPU:-$(nvidia-smi -L 2>/dev/null | grep -c GPU)}"
 [ "${NGPU:-0}" -lt 1 ] && NGPU=1
 JOBS="${JOBS:-$((2 * NGPU))}"
 STEPS="${STEPS:-500000}"
-SEEDS="${SEEDS:-0}"
+SEEDS="${SEEDS:-0 1 2}"
 WBANDS="${WBANDS:-1.0 2.0}"
 CEILINGS="${CEILINGS:-0.99 1.0}"
 LATENT="${LATENT:-16}"
+HID="${HID:-512}"          # bigger nets on the A100s (was 256)
 PY=".venv/bin/python"
 mkdir -p results/gridlogs
 if [ -z "${WANDB_API_KEY:-}" ] && [ -f .wandb_key ]; then
@@ -36,7 +38,7 @@ fi
 
 # band-ALONE (w_compress=0, gate off, no shell/logdet). RATCHET adaptive horizon (NOT fixed
 # H=15): h_min=15 floor, h_max=25, ratchet locks the running max. w_band + band_ceiling per-arm.
-BASE="model.latent_dim=${LATENT} model.dynamics=operator model.operator.structure=normal model.operator.rank=0 \
+BASE="model.latent_dim=${LATENT} model.hidden=${HID} model.dynamics=operator model.operator.structure=normal model.operator.rank=0 \
 model.operator.w_normal=0.05 model.operator.w_smooth=0.1 model.operator.w_radius=0.1 \
 model.dual_latent.enabled=true model.dual_latent.mode=twin model.dual_latent.couple_weight=0.1 \
 model.dual_latent.smooth_p=false model.dual_latent.penalize_reward=true model.dual_latent.radius_p=0.02 \
@@ -49,7 +51,7 @@ model.reward_heads=1 penalty.form=frobenius env=halfcheetah training.total_env_s
 logging.video.enabled=false penalty.auto_dose.enabled=false penalty.schedule.kind=cuberoot \
 penalty.schedule.lam0=1e-3 penalty.return_gate.enabled=false smoothing.enabled=false \
 imagination.reward_clip=1000 imagination.return_clip=10000 optim.value_clip=1000 optim.skip_nonfinite=true \
-optim.policy_ema_decay=0.0 imagination.adaptive_horizon.enabled=true imagination.adaptive_horizon.h_min=15 \
+optim.policy_ema_decay=0.0 imagination.adaptive_horizon.enabled=true imagination.adaptive_horizon.h_min=5 \
 imagination.adaptive_horizon.h_max=25 imagination.adaptive_horizon.ratchet=true \
 imagination.adaptive_horizon.ratchet_base=15"
 
