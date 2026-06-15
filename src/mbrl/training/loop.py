@@ -210,6 +210,24 @@ class Trainer:
                              init_scale=float(cfg.model.get("policy_init_scale", 1.0))).to(device)
         self.value = ValueFn(rk, h, d, task_dim=task_dim).to(device)
         self.value_target = copy.deepcopy(self.value).requires_grad_(False)
+        # A4 clipped double-value (PM 2026-06-15; TD3 twin-value min on the imagined λ-return
+        # bootstrap; off by default). Second value net + EMA target; v_tgt = min(V1,V2) kills
+        # value over-estimation. In-framework: still value-on-imagined-rollouts, no model-free Q.
+        self.double_value = bool(cfg.optim.get("clipped_double_value", False))
+        if self.double_value:
+            self.value2 = ValueFn(rk, h, d, task_dim=task_dim).to(device)
+            self.value2_target = copy.deepcopy(self.value2).requires_grad_(False)
+            self.value2_opt = torch.optim.AdamW(self.value2.parameters(), lr=cfg.optim.value_lr)
+        # A3 auto-tuned entropy temperature (PM 2026-06-15; SAC dual; off by default).
+        # α=exp(log_alpha) tuned so policy entropy tracks target_entropy — replaces the
+        # static/reward-annealed entropy coef. In-framework: just adapts the existing bonus.
+        _aa = dict(cfg.optim.get("auto_alpha", {}) or {})
+        self.auto_alpha = bool(_aa.get("enabled", False))
+        if self.auto_alpha:
+            self.alpha_target_H = float(_aa.get("target_entropy", 1.0))
+            self.log_alpha = torch.tensor(float(np.log(float(_aa.get("init", 3e-4)))),
+                                          device=device, requires_grad=True)
+            self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=float(_aa.get("lr", 1e-3)))
 
         # Transformer action-sequence planner (planner.enabled): REPLACES the
         # per-step MLP policy as the actor. It emits an H-step plan from z0; the
@@ -1181,6 +1199,14 @@ class Trainer:
         """Reward-adaptive policy regularization (PM 2026-06-15): returns (effective entropy
         coef, entropy-floor penalty tensor, effective actor grad-clip) from rf. Off ⇒
         (base_ent_coef, 0, actor_clip) — byte-identical."""
+        if self.auto_alpha:        # A3: SAC auto-temperature — α=exp(log_alpha) IS the entropy
+            alpha_loss = self.log_alpha * (entropy.detach() - self.alpha_target_H)  # coef; step
+            self.alpha_opt.zero_grad(set_to_none=True)                              # log_alpha
+            alpha_loss.backward(); self.alpha_opt.step()                            # so H→target
+            rf = self._reward_frac()
+            clip = (self.actor_clip * (self.ra_clip_min + (1.0 - self.ra_clip_min) * (1.0 - rf))
+                    if self.ra_clip_on else self.actor_clip)
+            return self.log_alpha.exp().detach(), entropy.new_zeros(()), clip
         rf = self._reward_frac()
         ent_coef = base_ent_coef * (1.0 - rf) if self.ra_anneal else base_ent_coef
         floor_pen = entropy.new_zeros(())
@@ -1504,6 +1530,8 @@ class Trainer:
             flat = ps.reshape(-1, ps.shape[-1])
             tgt_tau = tau0.repeat(H + 1, 1) if tau0 is not None else None
             v_tgt = self.value_target(flat, tgt_tau).reshape(H + 1, -1)
+            if self.double_value:   # A4: min(V1,V2) clipped-double-value bootstrap
+                v_tgt = torch.minimum(v_tgt, self.value2_target(flat, tgt_tau).reshape(H + 1, -1))
         if str(cfg_i.get("advantage", "lambda")) == "gae":
             adv, returns = gae_advantages(rs, v_tgt, gamma, lam_ret)
         else:
@@ -1564,6 +1592,17 @@ class Trainer:
         with torch.no_grad():
             for pt, pp in zip(self.value_target.parameters(), self.value.parameters()):
                 pt.lerp_(pp, 1.0 - decay)
+        if self.double_value:   # A4: train + EMA the second value net on the same λ-targets
+            v2 = self.value2(flat, v_tau).reshape(H, -1)
+            v2_loss = F.mse_loss(v2, returns.detach())
+            self.value2_opt.zero_grad(set_to_none=True); v2_loss.backward()
+            v2n = torch.nn.utils.clip_grad_norm_(self.value2.parameters(),
+                    self.value_clip if self.value_clip > 0.0 else float("inf"))
+            if (not self.skip_nonfinite) or torch.isfinite(v2n):
+                self.value2_opt.step()
+            with torch.no_grad():
+                for pt, pp in zip(self.value2_target.parameters(), self.value2.parameters()):
+                    pt.lerp_(pp, 1.0 - decay)
         self._update_policy_ema()
 
         return {"loss/value": v_loss.item(), "loss/policy": pi_loss.item(),
@@ -1662,18 +1701,22 @@ class Trainer:
                 self.rg_gate_now = self._rg_ratchet_min
 
     @torch.no_grad()
-    def act(self, z: torch.Tensor, tau: torch.Tensor | None = None) -> torch.Tensor:
+    def act(self, z: torch.Tensor, tau: torch.Tensor | None = None,
+            deterministic: bool = False) -> torch.Tensor:
         """Execution action selection (B, act): the planner's receding-horizon
         first planned action, or a policy sample. The one seam env-facing code
-        (collection, eval) uses, so the actor swap is invisible to train.py."""
+        (collection, eval) uses, so the actor swap is invisible to train.py.
+        deterministic=True returns the tanh-Gaussian MEAN (no action noise) — used
+        only by the det-eval metric; collection/gates keep the stochastic path."""
         if self.use_planner:
             return self.planner.act(z, tau)
         # policy inertia: act/collect with the slow EMA policy when enabled
         actor = (self.policy_ema if (self.policy_ema is not None and self.policy_ema_act)
                  else self.policy)
-        if self.dual_latent:                          # policy reads the policy latent p
-            return actor.sample(self.dual.p_of(z), tau)[0]
-        return actor.sample(z, tau)[0]
+        zin = self.dual.p_of(z) if self.dual_latent else z   # policy reads the policy latent p
+        if deterministic:
+            return actor.mean_action(zin, tau)
+        return actor.sample(zin, tau)[0]
 
     @torch.no_grad()
     def imagine(self, z0: torch.Tensor, horizon: int, tau0: torch.Tensor | None = None):
@@ -1692,6 +1735,11 @@ class Trainer:
                 "dynamics": self.dynamics.state_dict(), "reward": self.reward.state_dict(),
                 "policy": self.policy.state_dict(), "value": self.value.state_dict(),
                 "value_target": self.value_target.state_dict(),
+                **({"value2": self.value2.state_dict(),                 # A4 (off ⇒ absent)
+                    "value2_target": self.value2_target.state_dict(),
+                    "value2_opt": self.value2_opt.state_dict()} if self.double_value else {}),
+                **({"log_alpha": self.log_alpha.detach().cpu(),         # A3 (off ⇒ absent)
+                    "alpha_opt": self.alpha_opt.state_dict()} if self.auto_alpha else {}),
                 **({"policy_ema": self.policy_ema.state_dict()}
                    if self.policy_ema is not None else {}),
                 "model_opt": self.model_opt.state_dict(),
@@ -1761,6 +1809,14 @@ class Trainer:
             self.energy.load_state_dict(sd["energy"])
         if "value_target" in sd:
             self.value_target.load_state_dict(sd["value_target"])
+        if self.double_value and "value2" in sd:                       # A4
+            self.value2.load_state_dict(sd["value2"])
+            self.value2_target.load_state_dict(sd["value2_target"])
+            self.value2_opt.load_state_dict(sd["value2_opt"])
+        if self.auto_alpha and "log_alpha" in sd:                      # A3
+            with torch.no_grad():
+                self.log_alpha.copy_(sd["log_alpha"].to(self.log_alpha.device))
+            self.alpha_opt.load_state_dict(sd["alpha_opt"])
         if self.policy_ema is not None and "policy_ema" in sd:
             self.policy_ema.load_state_dict(sd["policy_ema"])
         self.model_opt.load_state_dict(sd["model_opt"])

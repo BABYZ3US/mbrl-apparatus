@@ -41,7 +41,7 @@ def make_env(cfg, num_envs: int):
     return gym.vector.AsyncVectorEnv([lambda i=i: one(i) for i in range(num_envs)])
 
 
-def evaluate(trainer, cfg, device, episodes: int = 3) -> tuple[float, float]:
+def evaluate(trainer, cfg, device, episodes: int = 3, deterministic: bool = False) -> tuple[float, float]:
     """Returns (mean episode return, mean forward velocity). x_velocity (when the
     env reports it, e.g. MuJoCo locomotion) is the do-nothing/conservatism check:
     a passive policy scores ~0 return AND ~0 velocity; a real runner has v>0."""
@@ -58,7 +58,7 @@ def evaluate(trainer, cfg, device, episodes: int = 3) -> tuple[float, float]:
             with torch.no_grad():
                 z = trainer.encoder(torch.as_tensor(obs, dtype=torch.float32,
                                                     device=device).unsqueeze(0))
-                a = trainer.act(z)
+                a = trainer.act(z, deterministic=deterministic)
             obs, r, term, trunc, info = env.step(a.squeeze(0).cpu().numpy())
             total += r
             vel_sum += float(info.get("x_velocity", info.get("reward_run", 0.0)))
@@ -163,7 +163,10 @@ def main(cfg: DictConfig):
         iteration = env_steps // cfg.training.steps_per_iter
         if iteration % cfg.training.eval_every_iters == 0:
             metrics["eval/return"], metrics["eval/x_velocity"] = evaluate(trainer, cfg, device)
-            trainer.observe_return(metrics["eval/return"])   # feed the return-gate
+            trainer.observe_return(metrics["eval/return"])   # feed the return-gate (stochastic)
+            if bool(cfg.get("eval", {}).get("deterministic", False)):  # det-eval metric (no train effect)
+                metrics["eval/return_det"], metrics["eval/x_velocity_det"] = evaluate(
+                    trainer, cfg, device, deterministic=True)
             eval_count += 1
             if video_enabled and eval_count % video_every == 0:
                 # never let a headless/render failure kill training

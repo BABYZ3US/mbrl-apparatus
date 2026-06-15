@@ -321,6 +321,58 @@ def test_lr_schedule_off_by_default():
     assert abs(t.model_opt.param_groups[0]["lr"] - 3e-4) < 1e-12      # legacy fixed lr, untouched
 
 
+# ---------------- ablation levers (det-eval / A3 auto-α / A4 double-value) ----------------
+def test_policy_mean_action_deterministic():
+    from mbrl.models.policy import Policy
+    p = Policy(4, 2, hidden=16, depth=1)
+    z = torch.randn(5, 4)
+    a1, a2 = p.mean_action(z), p.mean_action(z)
+    assert torch.equal(a1, a2)                                 # no noise -> identical
+    mu, _ = p(z)
+    assert torch.allclose(a1, torch.tanh(mu) * p.action_scale) and a1.shape == (5, 2)
+
+
+def test_act_deterministic_uses_mean():
+    t = Trainer(make_cfg(), obs_dim=3, action_dim=1)           # dual off -> non-dual act path
+    z = torch.randn(1, 4)                                      # latent_dim=4
+    assert torch.allclose(t.act(z, deterministic=True), t.policy.mean_action(z))
+
+
+def _opt_cfg(**over):
+    base = {"model_lr": 3e-4, "policy_lr": 1e-4, "value_lr": 3e-4}
+    base.update(over)
+    return make_cfg(optim=base)
+
+
+def test_auto_alpha_adapts_toward_target():
+    t = Trainer(_opt_cfg(auto_alpha={"enabled": True, "target_entropy": 1.0, "init": 3e-4, "lr": 0.1}),
+                obs_dim=3, action_dim=1)
+    assert t.auto_alpha and hasattr(t, "log_alpha")
+    a0 = float(t.log_alpha.exp())
+    coef, floor, _ = t._policy_reg(torch.tensor(0.2), 3e-4)    # entropy 0.2 < target 1.0
+    assert abs(float(coef) - float(t.log_alpha.exp())) < 1e-9 and float(floor) == 0.0
+    assert float(t.log_alpha.exp()) > a0                       # below target -> α grows
+    a1 = float(t.log_alpha.exp())
+    t._policy_reg(torch.tensor(3.0), 3e-4)                     # entropy 3.0 > target -> α shrinks
+    assert float(t.log_alpha.exp()) < a1
+
+
+def test_clipped_double_value_builds_and_checkpoints():
+    cfg = _opt_cfg(clipped_double_value=True)
+    t = Trainer(cfg, obs_dim=3, action_dim=1)
+    assert t.double_value and hasattr(t, "value2")
+    sd = t.state_dict()
+    assert all(k in sd for k in ("value2", "value2_target", "value2_opt"))
+    Trainer(cfg, obs_dim=3, action_dim=1).load_state_dict(sd)  # round-trip must not raise
+
+
+def test_a3_a4_off_by_default():
+    t = Trainer(make_cfg(), obs_dim=3, action_dim=1)
+    assert not t.double_value and not t.auto_alpha
+    sd = t.state_dict()
+    assert "value2" not in sd and "log_alpha" not in sd
+
+
 # ---------------- auto-dosed lambda ----------------
 def test_auto_dose_computes_finite_lam0_and_resumes_bitwise(tmp_path):
     cfg = make_cfg(penalty={"auto_dose": {"enabled": True, "target_ratio": 0.1,

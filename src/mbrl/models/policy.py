@@ -56,6 +56,12 @@ class Policy(nn.Module):
         logp = logp_gauss - log_det - mu.shape[-1] * math.log(self.action_scale + 1e-12)
         return a, logp
 
+    def mean_action(self, z: Tensor, tau: Tensor | None = None) -> Tensor:
+        """Deterministic action = the tanh-Gaussian MEAN (the standard eval/benchmark
+        convention). No action noise; ignores log_std. Used for the det-eval metric."""
+        mu, _ = self(z, tau)
+        return torch.tanh(mu) * self.action_scale
+
 
 class ValueFn(nn.Module):
     def __init__(self, latent_dim: int, hidden: int = 256, depth: int = 2,
