@@ -54,11 +54,14 @@ declare -a ARMS=(
   "A2pconsist|model.dual_latent.p_consistency_weight=3.0"
   "A3autoalpha|optim.auto_alpha.enabled=true"
   "A4dblvalue|optim.clipped_double_value=true"
+  "A5latent|model.latent_dim=32"                 # PM: 2x latent — watch the emergent eff_rank
 )
+# ONLY="A5latent" launches just that subset (alongside an already-running campaign); empty = all.
 throttle(){ while [ "$(jobs -rp|wc -l)" -ge "$JOBS" ]; do sleep 5; done; }
 pids=(); idx=0
 for entry in "${ARMS[@]}"; do
   arm="${entry%%|*}"; extra="${entry#*|}"
+  if [ -n "${ONLY:-}" ] && [[ " $ONLY " != *" $arm "* ]]; then continue; fi
   for seed in $SEEDS; do
     throttle
     tag="abl1-${arm}-s${seed}"; log="results/gridlogs/${tag}.log"; gpu=$((idx % NGPU)); idx=$((idx+1))
