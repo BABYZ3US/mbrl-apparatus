@@ -62,8 +62,11 @@ for wb in $WBANDS; do
 		log="results/gridlogs/${tag}.log"
 		gpu=$((idx % NGPU)); idx=$((idx + 1))
 		echo "launching ${tag} (band [${FLOOR},1.0] w_band=${wb}, NO rank demand, latent=${LATENT}) on GPU ${gpu} -> ${log}"
+		# ${EXTRA} = extra Hydra overrides (e.g. RESUME: EXTRA='~model.dual_latent.rank2_frame.w_compress'
+		# deletes the post-launch w_compress key so the resolved-config hash matches the original
+		# pre-w_compress cf14 lineage and checkpoint.resume=auto picks up the existing checkpoints).
 		OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 CUDA_VISIBLE_DEVICES="$gpu" \
-		$PY scripts/train.py $BASE model.dual_latent.rank2_frame.w_band="$wb" \
+		$PY scripts/train.py $BASE ${EXTRA:-} model.dual_latent.rank2_frame.w_band="$wb" \
 			seed="$seed" experiment.name="$tag" hydra.run.dir="outputs/${tag}" \
 			> "$log" 2>&1 &
 		pids+=($!)
