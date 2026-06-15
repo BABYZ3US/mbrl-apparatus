@@ -134,6 +134,34 @@ def spectral_band_penalty(z: Tensor, ceiling: float = 1.0, floor: float = 0.1) -
     return (above * above).sum() + (below * below).sum()
 
 
+def spectral_compress_penalty(z: Tensor, floor: float = 0.0, eps: float = 1e-2) -> Tensor:
+    """Nuclear-norm COMPRESSION of the band's free interior (PM 2026-06-14) —
+    Σ_i √(relu(λ_i − floor) + eps) over the Gram eigenvalues.
+
+    The band [floor, ceiling] gives the spectrum hard WALLS but a FREE interior — zero
+    gradient in the middle — so a representation that lands inside the band just drifts:
+    no internal pressure to converge (cf14 band-alone settled at eff_rank≈12, peaked low,
+    stalled). This restores the missing inward pressure. Σ√(·) is the nuclear-norm / convex
+    low-rank surrogate: √ is CONCAVE, so spreading a fixed amount of variance across many
+    modes costs MORE than concentrating it in a few (√4 = 2 < 4·√1 = 4). Minimizing it
+    rewards CONCENTRATION — variance collects in the modes that earn it (held up by
+    reward/reconstruction) while the weak active modes are pulled back down toward the floor.
+    No target rank: the effective rank still EMERGES, just lower and more decisively.
+
+    Crucially it compresses only the EXCESS ABOVE the floor (relu(λ−floor)): at/below the
+    floor the term is the constant √eps with ZERO gradient, so compression (i) never shocks
+    the near-singular early latent (λ≈0 ⇒ no pull ⇒ no nan — the pure Σ√λ form did nan the
+    imagined-return path through skip_nonfinite) and (ii) never fights the floor wall (it
+    cannot pull a mode below `floor`). It acts exactly where the user wanted it — the free
+    band interior — and is inert elsewhere. `eps` bounds the √ gradient at the floor
+    (1/(2√eps)); √ stays concave so the concentration reward is intact. floor=0 ⇒ the plain
+    nuclear norm Σ√(λ+eps)."""
+    zc = z - z.mean(0, keepdim=True)
+    cov = (zc.transpose(-1, -2) @ zc) / max(zc.shape[0], 1)
+    ev = torch.linalg.eigvalsh(cov.float()).clamp_min(0.0)
+    return (torch.relu(ev - floor) + eps).sqrt().sum()
+
+
 def log_det_barrier(z: Tensor, eps: float = 1e-2) -> Tensor:
     """Log-determinant volume barrier on the representation's Gram (PM 2026-06-14 — the
     KL / Gaussian-prior spectrum term):  −mean ln(λ_i + eps).

@@ -175,6 +175,7 @@ class Trainer:
             self.frame_w_band = float(_rf.get("w_band", 0.0) or 0.0)       # cf14 two-sided band
             self.frame_band_ceiling = float(_rf.get("band_ceiling", 1.0))
             self.frame_band_floor = float(_rf.get("band_floor", 0.1))
+            self.frame_w_compress = float(_rf.get("w_compress", 0.0) or 0.0)  # cf15 nuclear-norm compression
             if self.frame_enabled and self.frame_energy_mode == "contractive" \
                     and self.dual.mode != "twin":
                 raise ValueError("rank2_frame.energy_mode=contractive needs "
@@ -613,7 +614,7 @@ class Trainer:
         from ..regularization.rank2_frame import (axis_cos2, rank2_tail_penalty,
                                                    lyapunov_grounding, contractive_axis_in_d,
                                                    spectral_shell_penalty, log_det_barrier,
-                                                   spectral_band_penalty)
+                                                   spectral_band_penalty, spectral_compress_penalty)
         dl = self.dual
         metrics = {}
         term = z.new_zeros(())
@@ -658,6 +659,14 @@ class Trainer:
             band = spectral_band_penalty(z, self.frame_band_ceiling, self.frame_band_floor)
             term = term + self.frame_w_band * band
             metrics["frame/band"] = float(band.detach())
+        # cf15 nuclear-norm compression Σ√(relu(λ-floor)): the inward pressure the band's
+        # free interior lacks — concentrate variance into modes that earn it (rank emerges
+        # lower/decisively). Compresses only ABOVE the floor (inert below ⇒ no early-latent
+        # shock, never fights the floor wall).
+        if self.frame_w_compress > 0.0:
+            comp = spectral_compress_penalty(z, self.frame_band_floor)
+            term = term + self.frame_w_compress * comp
+            metrics["frame/compress"] = float(comp.detach())
         # lyapunov grounding: the autonomous drift must descend E
         if (self.frame_energy_mode == "lyapunov" and self.energy is not None
                 and self.frame_w_lyap > 0.0):

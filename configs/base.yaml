@@ -123,6 +123,13 @@ model:
       band_floor: 0.1   # lower wall: per-mode eigenvalue is free above this, penalized below
                         # (anti-collapse). cond is bounded by band_ceiling/band_floor; lower
                         # floor ⇒ more room for the rank to emerge (wider band).
+      w_compress: 0.0   # cf15 (PM 2026-06-14): nuclear-norm COMPRESSION Σ_i √λ_i — the
+                        # inward pressure the band's FREE interior lacks (band-alone drifts:
+                        # no gradient in the middle ⇒ no momentum to converge). √ is concave
+                        # ⇒ rewards CONCENTRATING variance into the modes that earn it,
+                        # compressing the rest toward the floor. NO target rank — rank still
+                        # emerges, just lower/more decisively. Complements the band floor
+                        # (catches compressed modes at floor, not 0) and the return_gate. 0=off.
       balance: false    # cf7 (PM 2026-06-14): equilibrium-couple the alignment (couple)
                         # and energy (dissipativity) penalties — normalize each by its
                         # running magnitude before summing so neither outweighs the other

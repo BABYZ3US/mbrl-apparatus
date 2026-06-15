@@ -17,7 +17,8 @@ from mbrl.models.dynamics import OperatorDynamics
 from mbrl.regularization.rank2_frame import (EnergyHead, axis_cos2, rank2_tail_penalty,
                                              lyapunov_grounding, contractive_axis_in_d,
                                              dissipativity_penalty, spectral_shell_penalty,
-                                             log_det_barrier, spectral_band_penalty)
+                                             log_det_barrier, spectral_band_penalty,
+                                             spectral_compress_penalty)
 from mbrl.training import Trainer
 from mbrl.utils.checkpoint import CheckpointManager
 from mbrl.utils.seeding import seed_everything
@@ -156,6 +157,28 @@ def test_band_wires_into_model_update():
     t = Trainer(cfg, obs_dim=3, action_dim=2)
     m = t.model_update(_batch())
     assert "frame/band" in m and math.isfinite(m["frame/band"])
+    assert math.isfinite(m["loss/total"])
+
+
+def test_spectral_compress_rewards_concentration():
+    """Σ√λ is LOWER for a concentrated spectrum than a spread one of EQUAL total variance
+    (√ is concave) — so minimizing it rewards concentration into fewer modes (low rank)."""
+    g = torch.Generator().manual_seed(0)
+    N, D = 4096, 4
+    z_conc = torch.randn(N, D, generator=g) * torch.tensor([2.0, 0.0, 0.0, 0.0])    # ~rank-1, trace ~4
+    z_spread = torch.randn(N, D, generator=g) * torch.tensor([1.0, 1.0, 1.0, 1.0])  # rank-4, trace ~4
+    assert spectral_compress_penalty(z_conc).item() < spectral_compress_penalty(z_spread).item()
+    assert math.isfinite(spectral_compress_penalty(z_conc).item())
+
+
+def test_compress_wires_into_model_update():
+    seed_everything(0)
+    cfg = _cfg(energy_mode="lyapunov")
+    cfg.model.dual_latent.rank2_frame.w_band = 5.0       # band + compression, the cf15 combo
+    cfg.model.dual_latent.rank2_frame.w_compress = 0.1
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    m = t.model_update(_batch())
+    assert "frame/compress" in m and math.isfinite(m["frame/compress"])
     assert math.isfinite(m["loss/total"])
 
 
