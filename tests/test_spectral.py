@@ -258,3 +258,63 @@ def test_svd_shrink_does_not_ring_and_reduces_to_ridge():
     svd_shrink_fit(sr, X, y, lam=1.0, kappa=1.0)
     mse_after = torch.mean((sr.predict(X) - y_clean) ** 2).item()
     assert mse_after < mse_before * 2     # contrast: shrink_coefs blows up >1000x
+
+
+def test_ridge_leverage_scores_match_pushthrough_and_deff():
+    """Cycle-2 candidate (leverage-score feature sampling, Bach 2017): the
+    feature ridge leverage scores l_j = diag(Phi^T (Phi Phi^T + lam I)^-1 Phi)
+    computed via the N x N Gram solve must equal the M x M push-through oracle
+    l = diag((Phi^T Phi)(Phi^T Phi + lam I)^-1), lie in [0, 1], and sum to the
+    ridge effective dimension d_eff(lam) = sum s_i/(s_i+lam)."""
+    from mbrl.models.spectral import ridge_leverage_scores, effective_dim
+
+    g = torch.Generator().manual_seed(0)
+    Phi = torch.randn(40, 60, generator=g)              # N=40 < M=60
+    lam = 1.3
+    lev = ridge_leverage_scores(Phi, lam)
+    G = Phi.T @ Phi
+    oracle = torch.diagonal(G @ torch.linalg.inv(G + lam * torch.eye(60)))
+    assert torch.allclose(lev, oracle, atol=3e-3, rtol=3e-3)
+    assert lev.min() >= -1e-5 and lev.max() <= 1.0 + 1e-4   # ridge-leverage bound
+    evals = torch.linalg.eigvalsh(Phi @ Phi.T)
+    assert abs(float(lev.sum()) - effective_dim(evals, lam)) < 1e-1
+
+
+def test_leverage_sampling_biases_toward_high_leverage():
+    """Importance-sampling features ∝ leverage selects higher-leverage features
+    than uniform — the mechanism the candidate relies on. Anisotropic inputs
+    (2 strong directions, 2 near-dead) make the leverage non-flat."""
+    from mbrl.models.spectral import ridge_leverage_scores
+
+    g = torch.Generator().manual_seed(3)
+    Z = torch.randn(300, 2, generator=g)
+    X = torch.cat([Z, 0.02 * torch.randn(300, 2, generator=g)], dim=1)
+    pool = SpectralReward(4, 240, [0.5, 1.0], seed=1)
+    lev = ridge_leverage_scores(pool.features(X), 1.0)
+    assert float(lev.std() / lev.mean()) > 0.1          # leverage is non-flat
+    probs = lev / lev.sum()
+    idx = torch.multinomial(probs, 60, replacement=False,
+                            generator=torch.Generator().manual_seed(7))
+    assert float(lev[idx].mean()) > float(lev.mean())   # favors high leverage
+
+
+def test_leverage_sample_resizes_basis_and_fits():
+    """leverage_sample mutates the pool head into a valid n_keep-feature
+    SpectralReward: W/b/w2/w4/c all resized and consistent, lev_info recorded,
+    and the downstream poly-band ridge fit/predict run unchanged on it."""
+    from mbrl.models.spectral import leverage_sample, poly_weights
+
+    g = torch.Generator().manual_seed(3)
+    Z = torch.randn(300, 2, generator=g)
+    X = torch.cat([Z, 0.02 * torch.randn(300, 2, generator=g)], dim=1)
+    pool = SpectralReward(4, 240, [0.5, 1.0], seed=1)
+    sr = leverage_sample(pool, X, 60, 1.0,
+                         generator=torch.Generator().manual_seed(7))
+    assert sr.M == 60 and sr.W.shape == (60, 4) and sr.b.shape == (60,)
+    assert torch.allclose(sr.w2, sr.W.pow(2).sum(-1))
+    assert torch.allclose(sr.w4, sr.w2.pow(2))
+    assert sr.c.shape == (60,) and float(sr.c.abs().max()) == 0.0
+    assert sr.lev_info["lev_cv"] > 0.1 and sr.lev_info["d_eff"] > 0.0
+    w = poly_weights(sr.w2.sqrt(), [2], [1e-2])         # champion penalty form
+    sr.fit(X, X[:, 0], weights=w)
+    assert torch.isfinite(sr.predict(X)).all()

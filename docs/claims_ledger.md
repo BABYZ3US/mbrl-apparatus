@@ -360,6 +360,44 @@ multi-scale frame + the validated poly recipe is sufficient; principled
 spectral filtering does not pay against it. Cycle 2 now moves to leverage-
 score feature sampling (Bach 2017 line).
 
+**Run 13 (2026-06-15, PRE-REGISTERED before results — research cycle 2, the
+final queued candidate: leverage-score feature sampling.** The cycle-2 queue's
+last item, after candidate A (ORF, run 12 — sub-threshold) and candidate B
+(Φ-SVD shrinkage, run 12B — NOT SUPPORTED). Idea (Bach 2017, "On the
+Equivalence between Kernel Quadrature Rules and Random Feature Expansions"): the
+number of random features needed to match full-kernel performance is governed by
+the kernel's LEVERAGE function; importance-sampling features from the leverage-
+tilted distribution (vs iid from the base spectral measure) needs provably
+fewer. Web-searched first: Bach 2017 (JMLR v18, leverage function in Fourier
+space); Rudi & Rosasco 2017 (generalization of RFF learning, Ω(√n log n)
+features, data-dependent sampling improves it); Rudi-Camoriano-Rosasco 2018
+(fast empirical-leverage sampling). Implementation: `spectral.ridge_leverage_
+scores` (per-feature ridge leverage l_j = diag(Φ(ΦΦᵀ+λI)⁻¹Φᵀ) via the N×N Gram
+solve; push-through identity is the test oracle) and `spectral.leverage_sample`
+(importance-sample N_FEATURES of a POOL_MULT× pool WITHOUT replacement ∝ l_j on
+the LABEL-FREE training design, rebuild the head). ONE CHANGE vs champion: the
+feature SET only — the calibrated cal_low ladder, poly-band penalty, closed-form
+ridge, and the SHAPES×LAMS=12 validation sweep are byte-for-byte identical; only
+the frequencies populating the basis differ (leverage-tilted vs iid). Arms on
+the calibrated champion form (run-6 smooth+resonant targets, n∈{512,2048}×5
+seeds×2 = 20 cells): champion (iid RFF, control) vs leverage. Harness:
+`scripts/leverage_sample_test.py` (sha-scoped results/bridge/<sha>/, chunked
+--budget, resumable). PRE-REGISTERED hyperparameters (fixed before results,
+chosen on a LABEL-FREE dry run — no test MSE consulted): POOL_MULT=4 (pool=2048);
+LAM_LEV=1.0 (central, clearly selective: leverage CV 1.0–1.8, d_eff 5.5–116
+across the 4 regimes). RECORDED CONTEXT for honest interpretation: the reward's
+effective dimension is SMALL — d_eff ≪ M=512 in every regime — so at the matched
+M=512 budget the low-rank signal may already be over-covered by iid features;
+leverage's theoretical edge is at M ≈ d_eff (a reduced-budget feature-efficiency
+question this matched-budget test deliberately does NOT ask, to honor the
+one-change/matched-budget rule). PRE-REGISTERED CRITERIA (ledger default bar,
+fixed before any cell ran): leverage ships into the champion config iff it beats
+champion in a MAJORITY of the 20 cells, mean relative test-MSE > +2%, AND worst
+cell > −20%. FALSIFIER: bar not cleared ⇒ NOT SUPPORTED, recorded; the cycle-2
+supervised queue is then EXHAUSTED (candidates A, B, and leverage all closed)
+and the loop moves to a fresh literature pass / the RL-loop questions.
+RESULTS: pending.
+
 **Runs 10–11 (2026-06-08, PRE-REGISTERED — the VAE/transformer generation,
 user-proposed).**
 - **Run 10 — VAE encoder (`vae_ablation` preset: champ-vae vs champion-ctl,

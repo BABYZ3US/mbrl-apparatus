@@ -268,6 +268,75 @@ def svd_shrink_fit(sr: "SpectralReward", X: Tensor, y: Tensor,
     return sr
 
 
+def effective_dim(evals: Tensor, lam: float) -> float:
+    """Ridge effective dimension d_eff(lam) = sum_i s_i / (s_i + lam) for the
+    Gram eigenvalues s_i. Equals the SUM of the ridge leverage scores (the
+    degrees of freedom of the ridge fit at regularization lam)."""
+    evals = torch.as_tensor(evals, dtype=torch.float32).clamp_min(0.0)
+    return float((evals / (evals + float(lam))).sum())
+
+
+def ridge_leverage_scores(Phi: Tensor, lam: float) -> Tensor:
+    """Empirical ridge leverage score of each FEATURE (column) of design
+    Phi (N, M):
+
+        l_j(lam) = phi_j^T (Phi Phi^T + lam I_N)^{-1} phi_j
+
+    = the diagonal of Phi^T (Phi Phi^T + lam I)^{-1} Phi. These per-feature
+    importances are what Bach (2017) shows govern how many random features are
+    needed to match full-kernel performance: sampling features from the
+    leverage-tilted distribution (vs iid from the base spectral measure) needs
+    provably fewer of them. The diagonal is computed via the N x N Gram solve
+    (N <= M_pool here); the push-through identity
+    l = diag((Phi^T Phi)(Phi^T Phi + lam I)^{-1}) gives the same numbers and is
+    used as the test oracle (tests/test_spectral.py)."""
+    Phi = torch.as_tensor(Phi, dtype=torch.float32)
+    N = Phi.shape[0]
+    K = Phi @ Phi.transpose(-2, -1)                          # (N, N) Gram
+    eye = torch.eye(N, dtype=Phi.dtype, device=Phi.device)
+    T = torch.linalg.solve(K + float(lam) * eye, Phi)        # (N, M)
+    return (Phi * T).sum(0).clamp_min(0.0)                   # (M,)
+
+
+def leverage_sample(sr: "SpectralReward", X: Tensor, n_keep: int, lam_lev: float,
+                    generator: "torch.Generator | None" = None) -> "SpectralReward":
+    """Research-cycle 2 candidate — leverage-score feature sampling (Bach 2017,
+    "On the Equivalence between Kernel Quadrature Rules and Random Feature
+    Expansions"; Rudi & Rosasco 2017; Rudi-Camoriano-Rosasco fast leverage
+    sampling 2018).
+
+    Subsample n_keep of sr's M (pool) random features by importance-sampling
+    WITHOUT replacement with probability proportional to the empirical ridge
+    leverage score l_j(lam_lev) on the (LABEL-FREE) training design X, then
+    mutate & return sr as a valid n_keep-feature SpectralReward (W / b / w2 / w4
+    / c resized). Everything downstream — calibrated ladder, poly-band weights,
+    closed-form ridge, validation sweep — is therefore byte-for-byte the
+    champion's; the ONLY changed variable is WHICH frequencies populate the
+    basis (leverage-tilted toward the data's spectral support vs iid from the
+    ladder measure). The features are NOT importance-reweighted (the
+    reweighted-kernel estimator is a separate change, deliberately out of scope
+    so this stays one-change). Records sr.lev_info = {lam_lev, d_eff, lev_cv}
+    for honesty: lev_cv ~ 0 means leverage was flat (selection ~ uniform)."""
+    X = torch.as_tensor(X, dtype=torch.float32, device=sr.device)
+    with torch.no_grad():
+        Phi = sr.features(X)                                 # pool design (N, M_pool)
+        lev = ridge_leverage_scores(Phi, lam_lev)           # (M_pool,)
+        d_eff = float(lev.sum())
+        cv = float(lev.std() / lev.mean().clamp_min(1e-12))
+        probs = lev / lev.sum().clamp_min(1e-12)
+        idx = torch.multinomial(probs, int(n_keep), replacement=False,
+                                generator=generator)
+        idx = torch.sort(idx).values
+    sr.W = sr.W[idx].contiguous()
+    sr.b = sr.b[idx].contiguous()
+    sr.M = int(n_keep)
+    sr.w2 = sr.W.pow(2).sum(-1)
+    sr.w4 = sr.w2.pow(2)
+    sr.c = torch.zeros(int(n_keep), device=sr.device)
+    sr.lev_info = {"lam_lev": float(lam_lev), "d_eff": d_eff, "lev_cv": cv}
+    return sr
+
+
 def snr_band_weights(Phi: Tensor, y: Tensor, omega_norms: Tensor,
                      n_bands: int = 8, snr_clip: tuple = (1e-3, 1e3),
                      generator: "torch.Generator | None" = None):
