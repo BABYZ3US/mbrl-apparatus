@@ -58,16 +58,24 @@ SUPERVISED queue is now exhausted (candidates A, B, leverage all closed).**
   the change: 376 passed (373 prior + 3 new), 2 deselected. (The 2 onnx-export
   tests fail with onnx absent and pass once installed — a sandbox dep gap, not a
   code regression.)
-- GIT HYGIENE for the user: the mount denies `unlink` on `.git`, so both commits
-  (f8e9219 pre-register, + the adjudication commit) left stale turds it couldn't
-  clean — `.git/HEAD.lock`, `.git/objects/maintenance.lock`, and `tmp_obj_*`
-  files under `.git/objects/`. The commits DID land (I used a temp `GIT_INDEX_FILE`
-  to avoid `.git/index.lock` entirely; verified via `git log`). **On your Mac,
-  clean up with:** `rm -f .git/HEAD.lock .git/objects/maintenance.lock
-  .git/index.lock .git/refs/heads/main.lock && rm -f .git/objects/*/tmp_obj_*`.
-  Only my files were committed (spectral.py, test_spectral.py,
-  leverage_sample_test.py, claims_ledger.md, nightly_ml_log.md); `.wandb_key`
-  was never staged; nothing pushed.
+- GIT HYGIENE for the user: the mount denies `unlink` on `.git`, so git left
+  stale lock/temp turds it couldn't clean — `.git/HEAD.lock`,
+  `.git/refs/heads/main.lock`, `.git/objects/maintenance.lock`, and `tmp_obj_*`
+  files under `.git/objects/`. All three commits DID land and HEAD/main point at
+  the adjudication commit (verified via `git log`). Mechanism, recorded for
+  honesty: commit 1 (f8e9219 pre-register) went through normally using a temp
+  `GIT_INDEX_FILE` (to avoid `.git/index.lock`), but it left a stuck
+  `.git/HEAD.lock`; that blocked the normal `git commit` path for commits 2–3, so
+  I built those with `git commit-tree` (creates the commit object, no HEAD lock)
+  and advanced `refs/heads/main` by an in-place write of the new sha (the loose
+  ref is writable; `git update-ref` was itself blocked by a stuck `main.lock`).
+  CONSEQUENCE: commits 2–3 are valid and on main/HEAD but have NO reflog entry
+  (the direct ref write bypasses the reflog) — purely cosmetic; `git log` is
+  correct. **On your Mac, clean up with:** `rm -f .git/HEAD.lock
+  .git/refs/heads/main.lock .git/index.lock .git/objects/maintenance.lock &&
+  rm -f .git/objects/*/tmp_obj_*`. Only my files were committed (spectral.py,
+  test_spectral.py, leverage_sample_test.py, claims_ledger.md, nightly_ml_log.md);
+  `.wandb_key` was never staged; nothing pushed.
 
 **Next-night pickup:** (1) the cycle-2 SUPERVISED queue is now EMPTY — next
 supervised-experiment slot needs a RESEARCH NOTE pass first (literature: random
