@@ -112,6 +112,17 @@ model:
                         # shell otherwise sends to ∞ as the tail→0). Paired with w_shell the
                         # tail settles at a small floor instead of 0. 0 = off.
       logdet_eps: 0.01  # ridge inside the log (soft barrier; push strength ~1/eps near 0).
+      w_band: 0.0       # cf14 (PM 2026-06-14): TWO-SIDED spectral BAND, the right lever
+                        # after cf10–cf13 showed enforcing a rank is wrong and a one-sided
+                        # barrier alone is vacuous. Σ_i relu(λ_i−band_ceiling)² +
+                        # Σ_i relu(band_floor−λ_i)² — bound EVERY Gram eigenvalue between a
+                        # hard floor and a hard ceiling, FREE in between, and let the rank
+                        # EMERGE inside the band (no target_rank). Nothing collapses to 0,
+                        # nothing runs away ⇒ cond(G) ≤ ceiling/floor bounded. 0 = off.
+      band_ceiling: 1.0 # upper wall: per-mode eigenvalue is free below this, penalized above.
+      band_floor: 0.1   # lower wall: per-mode eigenvalue is free above this, penalized below
+                        # (anti-collapse). cond is bounded by band_ceiling/band_floor; lower
+                        # floor ⇒ more room for the rank to emerge (wider band).
       balance: false    # cf7 (PM 2026-06-14): equilibrium-couple the alignment (couple)
                         # and energy (dissipativity) penalties — normalize each by its
                         # running magnitude before summing so neither outweighs the other

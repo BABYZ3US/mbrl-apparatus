@@ -17,7 +17,7 @@ from mbrl.models.dynamics import OperatorDynamics
 from mbrl.regularization.rank2_frame import (EnergyHead, axis_cos2, rank2_tail_penalty,
                                              lyapunov_grounding, contractive_axis_in_d,
                                              dissipativity_penalty, spectral_shell_penalty,
-                                             log_det_barrier)
+                                             log_det_barrier, spectral_band_penalty)
 from mbrl.training import Trainer
 from mbrl.utils.checkpoint import CheckpointManager
 from mbrl.utils.seeding import seed_everything
@@ -112,6 +112,50 @@ def test_logdet_wires_into_model_update():
     t = Trainer(cfg, obs_dim=3, action_dim=2)
     m = t.model_update(_batch())
     assert "frame/logdet_barrier" in m and math.isfinite(m["frame/logdet_barrier"])
+    assert math.isfinite(m["loss/total"])
+
+
+def test_spectral_band_confines_without_demanding_rank():
+    """The band is FREE inside [floor, ceiling] and — unlike the rank-k shell — does NOT
+    demand a rank: a 2-active and a 4-active spectrum (both inside the band) are penalized
+    ~equally, whereas the rank-2 shell penalizes the 4-active one for its extra modes."""
+    g = torch.Generator().manual_seed(0)
+    D = 6
+    def zfrom(v):
+        return torch.randn(4096, D, generator=g) * torch.tensor(v).sqrt()
+    z2 = zfrom([1.0, 1.0, 0.1, 0.1, 0.1, 0.1])   # 2 modes at the ceiling, rest at the floor
+    z4 = zfrom([1.0, 1.0, 1.0, 1.0, 0.1, 0.1])   # 4 modes at the ceiling, rest at the floor
+    band2 = spectral_band_penalty(z2, 1.0, 0.1).item()
+    band4 = spectral_band_penalty(z4, 1.0, 0.1).item()
+    assert band2 < 0.2 and band4 < 0.2               # both inside the band -> ~free
+    assert abs(band2 - band4) < 0.2                   # NO rank demand: 2- vs 4-active alike
+    # the rank-2 shell, by contrast, penalizes the 4-active spectrum's extra modes
+    assert spectral_shell_penalty(z4, 2, 1.0).item() > spectral_shell_penalty(z2, 2, 1.0).item() + 1.0
+
+
+def test_spectral_band_walls_penalize_escape():
+    """Above the ceiling and below the floor are both penalized — the two hard walls."""
+    g = torch.Generator().manual_seed(1)
+    D = 6
+    def zfrom(v):
+        return torch.randn(4096, D, generator=g) * torch.tensor(v).sqrt()
+    z_in = zfrom([0.9, 0.6, 0.55, 0.55, 0.55, 0.55])     # all inside [0.5, 1.0]
+    z_above = zfrom([4.0, 0.6, 0.55, 0.55, 0.55, 0.55])  # one mode runs away past the ceiling
+    z_below = zfrom([0.05] * D)                          # all modes collapse below the floor
+    base = spectral_band_penalty(z_in, 1.0, 0.5).item()
+    assert base < 0.3
+    assert spectral_band_penalty(z_above, 1.0, 0.5).item() > base + 1.0   # ceiling wall bites
+    assert spectral_band_penalty(z_below, 1.0, 0.5).item() > base + 0.5   # floor wall bites
+    assert math.isfinite(spectral_band_penalty(z_above, 1.0, 0.5).item())
+
+
+def test_band_wires_into_model_update():
+    seed_everything(0)
+    cfg = _cfg(energy_mode="lyapunov")
+    cfg.model.dual_latent.rank2_frame.w_band = 0.5
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    m = t.model_update(_batch())
+    assert "frame/band" in m and math.isfinite(m["frame/band"])
     assert math.isfinite(m["loss/total"])
 
 

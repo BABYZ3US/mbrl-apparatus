@@ -107,6 +107,33 @@ def spectral_shell_penalty(z: Tensor, target_rank: int = 2, target: float = 1.0,
     return shell
 
 
+def spectral_band_penalty(z: Tensor, ceiling: float = 1.0, floor: float = 0.1) -> Tensor:
+    """Two-sided spectral BAND (PM 2026-06-14) — bound the Gram spectrum between a HARD
+    FLOOR and a HARD CEILING, with a FREE middle, and let the RANK EMERGE inside:
+
+        band = Σ_i relu(λ_i − ceiling)²  +  Σ_i relu(floor − λ_i)²
+
+    The lesson of cf10–cf13: enforcing a hand-set rank is the wrong lever (rank-2 and
+    rank-4 both peaked-then-collapsed), and a ONE-SIDED barrier alone is vacuous — the
+    energy/dissipativity barrier only saw growth (latent contracts ⇒ inert), and the
+    log-det barrier alone only pushes eigenvalues UP (never caps them, never confines).
+    Neither CONFINES the spectrum to a band.
+
+    This term does. It penalizes ONLY eigenvalues that escape [floor, ceiling]; every mode
+    inside the band is free (zero gradient). So nothing collapses to 0 (the floor wall) and
+    nothing runs away (the ceiling wall) ⇒ cond(G)=λ_max/λ_min ≤ ceiling/floor is bounded —
+    but the NUMBER of active modes (how many the task pushes up to the ceiling vs leaves
+    near the floor) is chosen by the task, NOT imposed. The effective rank emerges between
+    the two hard walls. Unlike spectral_shell_penalty there is no target_rank: the floor is
+    applied to EVERY eigenvalue, not just a crushed tail. eigvalsh has a stable backward."""
+    zc = z - z.mean(0, keepdim=True)
+    cov = (zc.transpose(-1, -2) @ zc) / max(zc.shape[0], 1)
+    ev = torch.linalg.eigvalsh(cov.float()).clamp_min(0.0)   # ascending eigenvalues
+    above = torch.relu(ev - ceiling)                         # ceiling wall (don't run away)
+    below = torch.relu(floor - ev)                           # floor wall (don't collapse)
+    return (above * above).sum() + (below * below).sum()
+
+
 def log_det_barrier(z: Tensor, eps: float = 1e-2) -> Tensor:
     """Log-determinant volume barrier on the representation's Gram (PM 2026-06-14 — the
     KL / Gaussian-prior spectrum term):  −mean ln(λ_i + eps).

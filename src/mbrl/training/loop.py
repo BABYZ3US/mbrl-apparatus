@@ -172,6 +172,9 @@ class Trainer:
             self.frame_shell_floor = float(_rf.get("shell_floor", 0.0))  # tail floor (cond bound)
             self.frame_w_logdet = float(_rf.get("w_logdet", 0.0) or 0.0)  # cf12 KL/log-det cond barrier
             self.frame_logdet_eps = float(_rf.get("logdet_eps", 1e-2))
+            self.frame_w_band = float(_rf.get("w_band", 0.0) or 0.0)       # cf14 two-sided band
+            self.frame_band_ceiling = float(_rf.get("band_ceiling", 1.0))
+            self.frame_band_floor = float(_rf.get("band_floor", 0.1))
             if self.frame_enabled and self.frame_energy_mode == "contractive" \
                     and self.dual.mode != "twin":
                 raise ValueError("rank2_frame.energy_mode=contractive needs "
@@ -609,7 +612,8 @@ class Trainer:
         carry grad (it is the live encoder output). Returns (loss_term, metrics)."""
         from ..regularization.rank2_frame import (axis_cos2, rank2_tail_penalty,
                                                    lyapunov_grounding, contractive_axis_in_d,
-                                                   spectral_shell_penalty, log_det_barrier)
+                                                   spectral_shell_penalty, log_det_barrier,
+                                                   spectral_band_penalty)
         dl = self.dual
         metrics = {}
         term = z.new_zeros(())
@@ -648,6 +652,12 @@ class Trainer:
             ld = log_det_barrier(z, self.frame_logdet_eps)
             term = term + self.frame_w_logdet * ld
             metrics["frame/logdet_barrier"] = float(ld.detach())
+        # cf14 two-sided spectral band: bound EVERY Gram eigenvalue between a hard floor
+        # and a hard ceiling, free in between -> cond bounded, rank EMERGES (no rank demand)
+        if self.frame_w_band > 0.0:
+            band = spectral_band_penalty(z, self.frame_band_ceiling, self.frame_band_floor)
+            term = term + self.frame_w_band * band
+            metrics["frame/band"] = float(band.detach())
         # lyapunov grounding: the autonomous drift must descend E
         if (self.frame_energy_mode == "lyapunov" and self.energy is not None
                 and self.frame_w_lyap > 0.0):
