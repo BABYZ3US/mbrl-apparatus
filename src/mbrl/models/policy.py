@@ -18,10 +18,16 @@ _LOG2 = math.log(2.0)
 class Policy(nn.Module):
     def __init__(self, latent_dim: int, action_dim: int, hidden: int = 256,
                  depth: int = 2, action_scale: float = 1.0, task_dim: int = 0,
-                 init_scale: float = 1.0):
+                 init_scale: float = 1.0, log_std_min: float = -5.0):
         super().__init__()
         self.net = mlp([latent_dim + task_dim] + [hidden] * depth + [2 * action_dim])
         self.action_dim, self.action_scale, self.task_dim = action_dim, action_scale, task_dim
+        # HARD variance bound (PM 2026-06-15): the lower clamp on log_std is a settable
+        # attribute so the Trainer can drive it reward-adaptively (σ ≥ e^{log_std_min}). A
+        # minimum σ keeps collection exploratory — the policy CANNOT collapse to a
+        # deterministic point mass — the structural fix the soft entropy floors (cf19/cf20)
+        # couldn't enforce. Default -5.0 = the legacy clamp (byte-identical when undriven).
+        self.log_std_min = float(log_std_min)
         # near-zero init (seed robustness, PM 2026-06-15): shrink the final layer so the
         # initial policy is ~the same near-zero-action / mid-entropy map for EVERY seed,
         # cutting the across-seed spread in where training starts. init_scale<1 ⇒ mu≈0,
@@ -35,7 +41,7 @@ class Policy(nn.Module):
     def forward(self, z: Tensor, tau: Tensor | None = None) -> tuple[Tensor, Tensor]:
         x = torch.cat([z, tau], dim=-1) if self.task_dim else z
         mu, log_std = self.net(x).chunk(2, dim=-1)
-        return mu, log_std.clamp(-5, 2)
+        return mu, log_std.clamp(self.log_std_min, 2.0)
 
     def sample(self, z: Tensor, tau: Tensor | None = None) -> tuple[Tensor, Tensor]:
         """Reparameterized tanh-Gaussian sample with exact log-prob.

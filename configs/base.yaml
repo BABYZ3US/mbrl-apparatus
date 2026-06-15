@@ -378,6 +378,14 @@ reward_adapt:           # reward-adaptive policy regularization (PM 2026-06-15):
                         # exploring, small steps at peak return (stability at convergence).
     enabled: false
     min_frac: 0.1       # actor_clip *= min_frac + (1-min_frac)*(1-rf); rf=1 ⇒ clip*min_frac
+  logstd_floor:         # cf21 (PM 2026-06-15): reward-adaptive HARD variance bound. Drives the
+                        # policy's log_std lower-clamp by rf — a STRUCTURAL minimum σ (the policy
+                        # cannot collapse to a deterministic point mass), unlike the soft entropy
+                        # floor. floor HIGH (explore) early, relaxing to `lo` (commit) as return
+                        # climbs; the relaxation recovers peak return under stochastic eval.
+    enabled: false
+    hi: -1.0            # log_std floor at rf=0: σ ≥ e^-1 ≈ 0.37 (wide exploration)
+    lo: -4.0            # log_std floor at rf=1: σ ≥ e^-4 ≈ 0.018 (near-deterministic commit)
 
 optim:
   model_lr: 3.0e-4

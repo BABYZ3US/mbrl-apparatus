@@ -259,7 +259,16 @@ class Trainer:
         self.ra_floor_beta = float(_ef.get("beta", 4.0))
         _ac = dict(ra.get("actor_clip_adapt", {}) or {})
         self.ra_clip_on = bool(_ac.get("enabled", False)); self.ra_clip_min = float(_ac.get("min_frac", 0.1))
-        self._reward_adapt_on = self.ra_anneal or self.ra_floor_on or self.ra_clip_on
+        # reward-adaptive HARD log_std floor (cf21, PM 2026-06-15): drive the policy's
+        # variance bound by rf — floor HIGH (explore) at low return, relaxing toward `lo`
+        # (commit) as return climbs. The hard structural fix for the seed-spread collapse;
+        # replaces the soft entropy floor. eval samples stochastically, so the relaxation
+        # is what recovers near-deterministic peak return.
+        _lf = dict(ra.get("logstd_floor", {}) or {})
+        self.ra_lsf_on = bool(_lf.get("enabled", False))
+        self.ra_lsf_hi = float(_lf.get("hi", -1.0))   # log_std floor at rf=0 (σ ≥ e^hi, explore)
+        self.ra_lsf_lo = float(_lf.get("lo", -5.0))   # log_std floor at rf=1 (commit; -5 = legacy)
+        self._reward_adapt_on = self.ra_anneal or self.ra_floor_on or self.ra_clip_on or self.ra_lsf_on
         # NaN-stabilization levers (cf4, PM 2026-06-14). Diagnosed on cf3-i0-s2 @100k:
         # the twin's UNREGULARIZED policy operator op_p (radius_p≈1.06>1) makes imagined
         # p-rollouts grow geometrically; right as the policy crosses return≈0 a rollout
@@ -382,6 +391,7 @@ class Trainer:
         self.rg_leak = float(rg.get("leak", 0.1)) if rg else 0.1     # leaky_relu gate: pre-knee slope
         self.rg_ratchet = bool(rg.get("ratchet", False)) if rg else False  # cf19 monotonic gate
         self.ret_ema = None      # checkpointed
+        self._apply_logstd_floor()   # cf21: set the initial (rf=0, explore) variance bound
         self.rg_gate_now = 1.0   # current gate factor (1.0 = disabled / full lam)
         self._rg_ratchet_on = False    # engaged once return crosses mid (checkpointed)
         self._rg_ratchet_min = 1.0     # running-min gate once engaged (checkpointed)
@@ -1133,6 +1143,17 @@ class Trainer:
             return 0.0
         return min(max((self.ret_ema - self.ra_mid) / max(self.ra_scale, 1e-6), 0.0), 1.0)
 
+    def _apply_logstd_floor(self) -> None:
+        """cf21 (PM 2026-06-15): set the policy's HARD log_std floor from rf — high (explore)
+        at low return, relaxing linearly toward `lo` (commit) as return climbs. Derived
+        purely from ret_ema (checkpointed), so resume is bitwise-exact. No-op when off."""
+        if not self.ra_lsf_on:
+            return
+        lsm = self.ra_lsf_hi + (self.ra_lsf_lo - self.ra_lsf_hi) * self._reward_frac()
+        self.policy.log_std_min = lsm
+        if self.policy_ema is not None:
+            self.policy_ema.log_std_min = lsm
+
     def _policy_reg(self, entropy, base_ent_coef):
         """Reward-adaptive policy regularization (PM 2026-06-15): returns (effective entropy
         coef, entropy-floor penalty tensor, effective actor grad-clip) from rf. Off ⇒
@@ -1569,6 +1590,7 @@ class Trainer:
         self.ret_ema = (ep_return if self.ret_ema is None
                         else self.rg_decay * self.ret_ema
                         + (1 - self.rg_decay) * ep_return)
+        self._apply_logstd_floor()      # cf21: relax the hard variance bound as return climbs
         if not self.rg_enabled:
             return
         z = (self.ret_ema - self.rg_mid) / max(self.rg_scale, 1e-6)
@@ -1734,6 +1756,7 @@ class Trainer:
         self.dis_peak = sd.get("dis_peak", 0.0)
         self._spec_head_dis = sd.get("spec_head_dis", None)
         self.ret_ema = sd.get("ret_ema", None)
+        self._apply_logstd_floor()      # cf21: restore the variance bound from the resumed rf
         self.rg_gate_now = sd.get("rg_gate_now", 1.0)
         self._rg_ratchet_on = sd.get("rg_ratchet_on", False)
         self._rg_ratchet_min = sd.get("rg_ratchet_min", 1.0)

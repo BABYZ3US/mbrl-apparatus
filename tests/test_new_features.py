@@ -267,6 +267,37 @@ def test_entropy_floor_relu_constant_lift_deep():
     assert abs(-float(H.grad) - coef) < 1e-6             # constant lift = coef, no matter how deep
 
 
+def test_logstd_floor_reward_adaptive():
+    # cf21: HARD log_std floor driven by rf — high (explore) at low return, lo (commit) at high
+    hi, lo = -1.0, -4.0
+    t = Trainer(_ra_cfg(logstd_floor={"enabled": True, "hi": hi, "lo": lo}), obs_dim=3, action_dim=2)
+    assert abs(t.policy.log_std_min - hi) < 1e-6        # rf=0 (no eval yet) -> explore floor
+    t.observe_return(200.0)                             # ret_ema=200, scale=100 -> rf=1 -> commit
+    assert abs(t.policy.log_std_min - lo) < 1e-6
+    t2 = Trainer(_ra_cfg(logstd_floor={"enabled": True, "hi": hi, "lo": lo}), obs_dim=3, action_dim=2)
+    t2.observe_return(50.0)                             # rf=0.5 -> linear midpoint
+    assert abs(t2.policy.log_std_min - (hi + (lo - hi) * 0.5)) < 1e-6
+
+
+def test_logstd_floor_clamps_policy_output():
+    # the floor is a hard clamp: a policy that WANTS log_std=-50 is held at the floor; σ can't
+    # collapse. Driving log_std_min at runtime (as the Trainer does) is respected by forward.
+    from mbrl.models.policy import Policy
+    p = Policy(4, 2, hidden=16, depth=1, log_std_min=-1.5)
+    with torch.no_grad():
+        last = [m for m in p.net.modules() if isinstance(m, nn.Linear)][-1]
+        last.weight.zero_(); last.bias[2:].fill_(-50.0)         # force the log_std half very negative
+    z = torch.randn(8, 4)
+    assert torch.allclose(p(z)[1], torch.full((8, 2), -1.5))    # clamped to the floor
+    p.log_std_min = -3.0                                        # Trainer relaxes the floor at runtime
+    assert torch.allclose(p(z)[1], torch.full((8, 2), -3.0))
+
+
+def test_logstd_floor_off_is_legacy_clamp():
+    t = Trainer(make_cfg(), obs_dim=3, action_dim=1)           # no reward_adapt -> lsf off
+    assert abs(t.policy.log_std_min - (-5.0)) < 1e-6           # legacy -5 clamp, untouched
+
+
 # ---------------- auto-dosed lambda ----------------
 def test_auto_dose_computes_finite_lam0_and_resumes_bitwise(tmp_path):
     cfg = make_cfg(penalty={"auto_dose": {"enabled": True, "target_ratio": 0.1,
