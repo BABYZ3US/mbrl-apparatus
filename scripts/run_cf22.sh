@@ -51,7 +51,7 @@ model.dual_latent.rank2_frame.w_compress=0.0 model.dual_latent.rank2_frame.w_ban
 model.dual_latent.rank2_frame.band_ceiling=1.0 model.dual_latent.rank2_frame.band_floor=0.1 \
 model.reward_heads=1 penalty.form=frobenius env=halfcheetah training.total_env_steps=${STEPS} \
 logging.video.enabled=false penalty.auto_dose.enabled=false penalty.schedule.kind=cuberoot \
-penalty.schedule.lam0=0 penalty.lambda_min=0 penalty.return_gate.enabled=true penalty.return_gate.ratchet=true \
+penalty.schedule.lam0=0 penalty.schedule.floor=0 penalty.lambda_min=0 penalty.return_gate.enabled=true penalty.return_gate.ratchet=true \
 penalty.return_gate.shape=leaky_relu penalty.return_gate.leak=0.1 penalty.return_gate.mid=0.0 \
 penalty.return_gate.scale=100.0 penalty.return_gate.floor=0.1 reward_adapt.mid=0.0 reward_adapt.scale=1000.0 \
 reward_adapt.entropy_anneal=true reward_adapt.entropy_floor.enabled=false \
