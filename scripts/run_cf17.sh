@@ -29,7 +29,7 @@ SEEDS="${SEEDS:-0 1 2}"
 WBANDS="${WBANDS:-1.0 2.0}"
 CEILINGS="${CEILINGS:-0.99 1.0}"
 LATENT="${LATENT:-16}"
-HID="${HID:-512}"          # bigger nets on the A100s (was 256)
+HID="${HID:-256}"          # net width
 PY=".venv/bin/python"
 mkdir -p results/gridlogs
 if [ -z "${WANDB_API_KEY:-}" ] && [ -f .wandb_key ]; then
