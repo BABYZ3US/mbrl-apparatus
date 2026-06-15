@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# CURVATURE-LAMBDA ABLATION (PM 2026-06-15): drop the reward-Hessian curvature penalty
-# entirely (penalty.schedule.lam0=0, penalty.lambda_min=0) and let the BAND carry the
-# regularization on its own. Rationale + framing from the loss/RH audit: the band's floor
+# CURVATURE-LAMBDA ABLATION (PM 2026-06-15): drop the reward-Hessian curvature SCHEDULE
+# (penalty.schedule.lam0=0) and pin lambda at its minimal floor (penalty.lambda_min=1e-4 =>
+# lambda=1e-4 constant), letting the BAND carry the regularization. NOTE the floor is 1e-4,
+# NOT exactly 0 — a small nonzero lambda is a valid condition, not a bug; if it climbs that
+# refutes 'lambda must be substantial'. Rationale + framing from the loss/RH audit: the band's floor
 # wall Φ(f−λ) is the Tikhonov conditioning of the latent Gram — it holds λ_min(G) ≥ f, the
 # ridge that keeps the Gram off singular — so "keep the Tikhonov regularization, drop the
 # curvature λ" = keep the band, remove ONLY the Hutchinson ∇²R penalty (the founding R4/R16
 # mechanism). The curvature λ is already gated to ~1e-3..1e-4 in the winning runs, so this
 # tests whether the residual it carries matters at all. lam0=0 is the sanctioned ablation
-# (CLAUDE.md). With λ≡0 the return-gate + lambda-ratchet gate a zero and are moot.
+# (CLAUDE.md). lambda is pinned at the 1e-4 floor (schedule ~0), so the gate/ratchet are ~moot.
 #
 # WHAT THIS DOES *NOT* FIX: it inherits cf21's policy setup (sigma-only hard log_std floor,
 # NO mean bound), so the tanh-MEAN-saturation entropy blowups + shaky seed spread carry over
@@ -51,7 +53,7 @@ model.dual_latent.rank2_frame.w_compress=0.0 model.dual_latent.rank2_frame.w_ban
 model.dual_latent.rank2_frame.band_ceiling=1.0 model.dual_latent.rank2_frame.band_floor=0.1 \
 model.reward_heads=1 penalty.form=frobenius env=halfcheetah training.total_env_steps=${STEPS} \
 logging.video.enabled=false penalty.auto_dose.enabled=false penalty.schedule.kind=cuberoot \
-penalty.schedule.lam0=0 penalty.schedule.floor=0 penalty.lambda_min=0 penalty.return_gate.enabled=true penalty.return_gate.ratchet=true \
+penalty.schedule.lam0=0 penalty.lambda_min=1e-4 penalty.return_gate.enabled=true penalty.return_gate.ratchet=true \
 penalty.return_gate.shape=leaky_relu penalty.return_gate.leak=0.1 penalty.return_gate.mid=0.0 \
 penalty.return_gate.scale=100.0 penalty.return_gate.floor=0.1 reward_adapt.mid=0.0 reward_adapt.scale=1000.0 \
 reward_adapt.entropy_anneal=true reward_adapt.entropy_floor.enabled=false \
