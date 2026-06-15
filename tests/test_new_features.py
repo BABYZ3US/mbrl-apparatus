@@ -193,6 +193,47 @@ def test_horizon_ratchet_state_checkpointed():
     assert t2._horizon_ratchet(5) == 20                          # resumed: still holds the floor
 
 
+# ---------------- reward-adaptive policy regularization (PM 2026-06-15) ----------------
+def test_policy_init_scale_near_zero():
+    from mbrl.models.policy import Policy
+    torch.manual_seed(0)
+    p = Policy(8, 2, hidden=32, depth=1, init_scale=0.001)
+    mu, log_std = p(torch.randn(16, 8))
+    assert mu.abs().mean() < 0.05 and log_std.abs().mean() < 0.05   # ~same near-zero map every seed
+
+
+def _ra_cfg(**ra):
+    base = {"mid": 0.0, "scale": 100.0}
+    base.update(ra)
+    return make_cfg(reward_adapt=base)
+
+
+def test_reward_frac_maps_return():
+    t = Trainer(_ra_cfg(entropy_anneal=True), obs_dim=3, action_dim=1)
+    assert t._reward_frac() == 0.0                       # ret_ema None -> 0
+    t.ret_ema = 0.0;   assert t._reward_frac() == 0.0    # at mid
+    t.ret_ema = 50.0;  assert abs(t._reward_frac() - 0.5) < 1e-6
+    t.ret_ema = 200.0; assert t._reward_frac() == 1.0    # clipped at 1
+
+
+def test_policy_reg_three_knobs_track_reward():
+    t = Trainer(_ra_cfg(entropy_anneal=True, entropy_floor={"enabled": True, "h_high": 1.0, "coef": 0.1},
+                        actor_clip_adapt={"enabled": True, "min_frac": 0.1}), obs_dim=3, action_dim=1)
+    H = torch.tensor(0.2)
+    t.ret_ema = 0.0                                       # low return (rf=0): explore
+    ec0, fp0, cl0 = t._policy_reg(H, 1.0)
+    assert abs(ec0 - 1.0) < 1e-6 and fp0.item() > 0 and abs(cl0 - t.actor_clip) < 1e-6
+    t.ret_ema = 200.0                                    # high return (rf=1): exploit
+    ec1, fp1, cl1 = t._policy_reg(H, 1.0)
+    assert ec1 < 1e-6 and fp1.item() == 0.0 and abs(cl1 - t.actor_clip * 0.1) < 1e-4
+
+
+def test_reward_adapt_off_is_identity():
+    t = Trainer(make_cfg(), obs_dim=3, action_dim=1)     # no reward_adapt block -> all off
+    ec, fp, cl = t._policy_reg(torch.tensor(0.5), 3e-4)
+    assert ec == 3e-4 and fp.item() == 0.0 and cl == t.actor_clip
+
+
 # ---------------- auto-dosed lambda ----------------
 def test_auto_dose_computes_finite_lam0_and_resumes_bitwise(tmp_path):
     cfg = make_cfg(penalty={"auto_dose": {"enabled": True, "target_ratio": 0.1,

@@ -151,6 +151,10 @@ model:
   hidden: 256
   depth: 2
   ema_decay: 0.995
+  policy_init_scale: 1.0   # seed robustness (PM 2026-06-15): <1 shrinks the policy's final
+                        # layer so every seed starts from ~the same near-zero-action policy
+                        # (mu≈0, σ≈1), cutting across-seed variance in where the climb starts.
+                        # 1.0 = default init. Pairs with reward_adapt.entropy_floor.
   symlog_reward: true   # reward model predicts symlog(r); imagination symexps it back
   reward_heads: 3       # ensemble: shared trunk + N linear heads (1 = plain model)
 
@@ -348,6 +352,25 @@ planner:                # transformer action-sequence planner (Dreamer latent-pl
   d_model: 128
   nhead: 4
   layers: 2
+
+reward_adapt:           # reward-adaptive policy regularization (PM 2026-06-15): one return-
+                        # fraction rf=clip((ret_ema-mid)/scale,0,1) [0=low return→explore,
+                        # 1=high→exploit] drives three composable knobs (the policy analog of
+                        # the lambda/horizon ratchets). All default off ⇒ byte-identical.
+  mid: 0.0              # return where rf starts rising (the do-nothing boundary)
+  scale: 500.0          # return units to rf=1 (≈ a 'converged' HalfCheetah return)
+  entropy_anneal: false # multiply the entropy bonus by (1-rf): strong exploration early,
+                        # fades to ~0 as the policy gets good (ratchet-able via the gate).
+  entropy_floor:        # penalize entropy below H*(rf)=h_high*(1-rf): force exploration when
+                        # return is low, allow commitment as it rises. Keeps a near-zero-init
+                        # policy from collapsing before reward justifies it.
+    enabled: false
+    h_high: 1.0         # entropy floor at rf=0 (nats); the floor → 0 as rf → 1
+    coef: 0.01          # penalty weight on relu(H* - H)
+  actor_clip_adapt:     # tighten the actor grad-clip as return rises: big policy steps while
+                        # exploring, small steps at peak return (stability at convergence).
+    enabled: false
+    min_frac: 0.1       # actor_clip *= min_frac + (1-min_frac)*(1-rf); rf=1 ⇒ clip*min_frac
 
 optim:
   model_lr: 3.0e-4

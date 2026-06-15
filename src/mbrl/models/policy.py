@@ -17,10 +17,20 @@ _LOG2 = math.log(2.0)
 
 class Policy(nn.Module):
     def __init__(self, latent_dim: int, action_dim: int, hidden: int = 256,
-                 depth: int = 2, action_scale: float = 1.0, task_dim: int = 0):
+                 depth: int = 2, action_scale: float = 1.0, task_dim: int = 0,
+                 init_scale: float = 1.0):
         super().__init__()
         self.net = mlp([latent_dim + task_dim] + [hidden] * depth + [2 * action_dim])
         self.action_dim, self.action_scale, self.task_dim = action_dim, action_scale, task_dim
+        # near-zero init (seed robustness, PM 2026-06-15): shrink the final layer so the
+        # initial policy is ~the same near-zero-action / mid-entropy map for EVERY seed,
+        # cutting the across-seed spread in where training starts. init_scale<1 ⇒ mu≈0,
+        # log_std≈0 (σ≈1). The reward-coupled entropy floor then keeps exploration alive.
+        if init_scale != 1.0:
+            last = [m for m in self.net.modules() if isinstance(m, nn.Linear)][-1]
+            with torch.no_grad():
+                last.weight.mul_(init_scale)
+                last.bias.zero_()
 
     def forward(self, z: Tensor, tau: Tensor | None = None) -> tuple[Tensor, Tensor]:
         x = torch.cat([z, tau], dim=-1) if self.task_dim else z

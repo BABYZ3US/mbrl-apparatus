@@ -206,7 +206,8 @@ class Trainer:
         # grid). Init 1.0 = conservative floor before any real data is seen.
         self.symlog_bound = 1.0  # checkpointed (bitwise resume)
         self.symexp_margin = float(cfg.imagination.get("symexp_margin", 1.5))
-        self.policy = Policy(rk, action_dim, h, d, task_dim=task_dim).to(device)
+        self.policy = Policy(rk, action_dim, h, d, task_dim=task_dim,
+                             init_scale=float(cfg.model.get("policy_init_scale", 1.0))).to(device)
         self.value = ValueFn(rk, h, d, task_dim=task_dim).to(device)
         self.value_target = copy.deepcopy(self.value).requires_grad_(False)
 
@@ -240,6 +241,20 @@ class Trainer:
         # actor grad-clip — the transformer-stabilization study's levers.
         self.align_weight = float(cfg.imagination.get("align_weight", 0.0))
         self.actor_clip = float(cfg.optim.get("actor_clip", 100.0))
+        # reward-adaptive policy regularization (PM 2026-06-15): one return-fraction
+        # rf=clip((ret_ema-mid)/scale,0,1) [0=low return→explore, 1=high→exploit] drives
+        # three composable knobs — anneal the entropy bonus, floor the entropy by reward,
+        # and tighten the actor grad-clip as return rises (the policy analog of the λ/horizon
+        # ratchets). Pairs with policy_init_scale (consistent near-zero start). All default off.
+        ra = dict(cfg.get("reward_adapt", {}) or {})
+        self.ra_mid = float(ra.get("mid", 0.0)); self.ra_scale = float(ra.get("scale", 500.0))
+        self.ra_anneal = bool(ra.get("entropy_anneal", False))
+        _ef = dict(ra.get("entropy_floor", {}) or {})
+        self.ra_floor_on = bool(_ef.get("enabled", False))
+        self.ra_floor_h = float(_ef.get("h_high", 1.0)); self.ra_floor_coef = float(_ef.get("coef", 0.01))
+        _ac = dict(ra.get("actor_clip_adapt", {}) or {})
+        self.ra_clip_on = bool(_ac.get("enabled", False)); self.ra_clip_min = float(_ac.get("min_frac", 0.1))
+        self._reward_adapt_on = self.ra_anneal or self.ra_floor_on or self.ra_clip_on
         # NaN-stabilization levers (cf4, PM 2026-06-14). Diagnosed on cf3-i0-s2 @100k:
         # the twin's UNREGULARIZED policy operator op_p (radius_p≈1.06>1) makes imagined
         # p-rollouts grow geometrically; right as the policy crosses return≈0 a rollout
@@ -1105,6 +1120,27 @@ class Trainer:
             return self._ah_ratchet_floor
         return H
 
+    def _reward_frac(self) -> float:
+        """rf ∈ [0,1] from the return EMA: 0 = at/below mid (explore), 1 = at/above mid+scale
+        (exploit). Drives all three reward-adaptive policy knobs. 0 until the first eval."""
+        if self.ret_ema is None:
+            return 0.0
+        return min(max((self.ret_ema - self.ra_mid) / max(self.ra_scale, 1e-6), 0.0), 1.0)
+
+    def _policy_reg(self, entropy, base_ent_coef):
+        """Reward-adaptive policy regularization (PM 2026-06-15): returns (effective entropy
+        coef, entropy-floor penalty tensor, effective actor grad-clip) from rf. Off ⇒
+        (base_ent_coef, 0, actor_clip) — byte-identical."""
+        rf = self._reward_frac()
+        ent_coef = base_ent_coef * (1.0 - rf) if self.ra_anneal else base_ent_coef
+        floor_pen = entropy.new_zeros(())
+        if self.ra_floor_on:                       # penalize entropy below H*(rf)=h_high·(1-rf)
+            floor_pen = self.ra_floor_coef * torch.relu((self.ra_floor_h * (1.0 - rf)) - entropy)
+        clip = self.actor_clip
+        if self.ra_clip_on:                        # tighten the grad-clip as return rises
+            clip = self.actor_clip * (self.ra_clip_min + (1.0 - self.ra_clip_min) * (1.0 - rf))
+        return ent_coef, floor_pen, clip
+
     # ---------------- behaviour learning (Dreamer lambda-returns) ----------------
     def behaviour_update(self, z0: torch.Tensor, tau0: torch.Tensor | None = None) -> dict:
         if self.dual_latent:
@@ -1179,7 +1215,8 @@ class Trainer:
         #     entropy (never curvature-penalized, R10)
         entropy = -logps.mean()
         pi_signal = adv if adv is not None else returns
-        pi_loss = -(pi_signal / norm).mean() - ent_coef * entropy
+        ent_coef_eff, floor_pen, clip_eff = self._policy_reg(entropy, ent_coef)
+        pi_loss = -(pi_signal / norm).mean() - ent_coef_eff * entropy + floor_pen
         # Imagination-latent ALIGNMENT (arXiv 2507.16450-inspired stabilizer):
         # pull the rolled-out imagined latents back onto the ENCODER's manifold
         # by matching the per-dim mean/std of z0 (the real encoded latents).
@@ -1200,7 +1237,7 @@ class Trainer:
         self.policy_opt.zero_grad(set_to_none=True)
         pi_loss.backward()
         actor = self.planner if self.use_planner else self.policy
-        gnorm = torch.nn.utils.clip_grad_norm_(actor.parameters(), self.actor_clip)
+        gnorm = torch.nn.utils.clip_grad_norm_(actor.parameters(), clip_eff)
         self.policy_opt.step()
 
         # --- value: regress to lambda-returns on detached latents ---
@@ -1433,7 +1470,8 @@ class Trainer:
 
         entropy = -logps.mean()
         pi_signal = adv if adv is not None else returns
-        pi_loss = -(pi_signal / norm).mean() - ent_coef * entropy
+        ent_coef_eff, floor_pen, clip_eff = self._policy_reg(entropy, ent_coef)
+        pi_loss = -(pi_signal / norm).mean() - ent_coef_eff * entropy + floor_pen
         align_val = 0.0
         if self.align_weight > 0.0:                   # 2507.16450 stabilizer, in p-space
             with torch.no_grad():
@@ -1446,7 +1484,7 @@ class Trainer:
         pi_loss = pi_loss + self._policy_inertia_term()    # weight inertia (off by default)
         self.policy_opt.zero_grad(set_to_none=True)
         pi_loss.backward()
-        gnorm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.actor_clip)
+        gnorm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), clip_eff)
         if (not self.skip_nonfinite) or torch.isfinite(gnorm):   # cf4: don't poison θ_π
             self.policy_opt.step()
         else:
@@ -1514,11 +1552,15 @@ class Trainer:
         `rg_slew` caps the per-eval change so a collapse can't spike the gate.
         No-op when disabled. ret_ema + rg_gate_now are checkpointed."""
         import math as _m
-        if not self.rg_enabled or not _m.isfinite(ep_return):
+        if not _m.isfinite(ep_return) or not (self.rg_enabled or self._reward_adapt_on):
             return
+        # ret_ema feeds BOTH the gate and the reward-adaptive policy knobs, so update it
+        # whenever either is on; the gate math below is skipped when the gate is off.
         self.ret_ema = (ep_return if self.ret_ema is None
                         else self.rg_decay * self.ret_ema
                         + (1 - self.rg_decay) * ep_return)
+        if not self.rg_enabled:
+            return
         z = (self.ret_ema - self.rg_mid) / max(self.rg_scale, 1e-6)
         u = max(min(z, 1.0), -1.0)               # signed distance from mid, clipped
         if self.rg_shape == "sigmoid":
