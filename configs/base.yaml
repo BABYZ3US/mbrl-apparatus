@@ -207,6 +207,10 @@ penalty:
     scale: 100.0        # return units over which the gate relaxes mid→mid+scale (quadratic)
                         # / sigmoid transition width; set to the env's good return level
     slew: 0.1           # max |Δgate| per eval — a collapse can't spike lam (anti-spike)
+    ratchet: false      # cf19 (PM 2026-06-15): horizon-ratchet logic for lambda. Once the
+                        # return EMA crosses mid, LOCK the gate's running minimum — lambda's
+                        # relaxation can only deepen, never re-tighten (a transient return dip
+                        # can't re-regularize a converging policy). Stability at peak. 0=off.
   auto_dose:            # auto-set lam0 from the measured fit/penalty scale ratio
     enabled: true       # DEFAULT ON: dose measured per env (presets that need
                         # fixed doses disable it explicitly)

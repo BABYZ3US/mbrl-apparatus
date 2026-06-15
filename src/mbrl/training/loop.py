@@ -359,8 +359,11 @@ class Trainer:
         self.rg_scale = float(rg.get("scale", 100.0)) if rg else 100.0  # transition width
         self.rg_slew = float(rg.get("slew", 0.1)) if rg else 0.1     # max gate change per eval
         self.rg_shape = str(rg.get("shape", "quadratic")) if rg else "quadratic"  # quadratic|sigmoid
+        self.rg_ratchet = bool(rg.get("ratchet", False)) if rg else False  # cf19 monotonic gate
         self.ret_ema = None      # checkpointed
         self.rg_gate_now = 1.0   # current gate factor (1.0 = disabled / full lam)
+        self._rg_ratchet_on = False    # engaged once return crosses mid (checkpointed)
+        self._rg_ratchet_min = 1.0     # running-min gate once engaged (checkpointed)
 
         # Spectral reward path (spectral.enabled): the reward is an ensemble of
         # closed-form RFF ridge heads over the SAME coords as the penalty
@@ -1540,6 +1543,16 @@ class Trainer:
         target = self.rg_floor + (1.0 - self.rg_floor) * relax
         lo, hi = self.rg_gate_now - self.rg_slew, self.rg_gate_now + self.rg_slew
         self.rg_gate_now = min(max(target, lo), hi)             # slew-rate limited
+        if self.rg_ratchet:
+            # cf19 (PM 2026-06-15): the horizon-ratchet logic applied to lambda. Once the
+            # policy makes genuine progress (return EMA crosses mid), LOCK the gate's running
+            # minimum: lambda's relaxation can deepen but never re-tighten, so a transient
+            # return dip can't re-regularize a converging policy. Stability at peak convergence.
+            if not self._rg_ratchet_on and self.ret_ema > self.rg_mid:
+                self._rg_ratchet_on = True
+            if self._rg_ratchet_on:
+                self._rg_ratchet_min = min(self._rg_ratchet_min, self.rg_gate_now)
+                self.rg_gate_now = self._rg_ratchet_min
 
     @torch.no_grad()
     def act(self, z: torch.Tensor, tau: torch.Tensor | None = None) -> torch.Tensor:
@@ -1600,6 +1613,7 @@ class Trainer:
                 "spec_head_dis": self._spec_head_dis,
                 # return-gate state (bitwise resume)
                 "ret_ema": self.ret_ema, "rg_gate_now": self.rg_gate_now,
+                "rg_ratchet_on": self._rg_ratchet_on, "rg_ratchet_min": self._rg_ratchet_min,
                 "hutchinson_gen": self.gen.get_state()}
         if self.spec_enabled:
             # spectral reward: per-head (W, b, c) + the rolling cache + refit
@@ -1659,6 +1673,8 @@ class Trainer:
         self._spec_head_dis = sd.get("spec_head_dis", None)
         self.ret_ema = sd.get("ret_ema", None)
         self.rg_gate_now = sd.get("rg_gate_now", 1.0)
+        self._rg_ratchet_on = sd.get("rg_ratchet_on", False)
+        self._rg_ratchet_min = sd.get("rg_ratchet_min", 1.0)
         self.ad_count = sd.get("ad_count", 0)
         self.ad_fit_sum = sd.get("ad_fit_sum", 0.0)
         self.ad_pen_sum = sd.get("ad_pen_sum", 0.0)

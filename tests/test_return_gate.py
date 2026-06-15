@@ -140,6 +140,29 @@ def test_slew_limits_the_spike():
     assert abs(t.rg_gate_now - 0.5) < 1e-3      # eventually eases to the floor
 
 
+def test_lambda_gate_ratchet_no_retighten():
+    """cf19 ratchet: once the return EMA crosses mid (gate relaxes downward), lambda's
+    relaxation can only DEEPEN — a later crash cannot re-tighten the gate. Without the
+    ratchet the same crash re-tightens it (gate rises back)."""
+    cfg = _cfg(floor=0.1, decay=0.0, mid=0.0, scale=100.0, slew=0.1)
+    cfg.penalty.return_gate.ratchet = True
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    for _ in range(3):
+        t.observe_return(120.0)                 # return>mid: gate relaxes down, ratchet engages
+    g = t.rg_gate_now
+    assert t._rg_ratchet_on and g < 0.95
+    t.observe_return(-500.0)                     # crash
+    assert t.rg_gate_now <= g + 1e-9             # ratchet HOLDS — no re-tighten
+    # control: no ratchet -> the same crash re-tightens (gate rises)
+    cfg2 = _cfg(floor=0.1, decay=0.0, mid=0.0, scale=100.0, slew=0.1)
+    t2 = Trainer(cfg2, obs_dim=3, action_dim=2)
+    for _ in range(3):
+        t2.observe_return(120.0)
+    g2 = t2.rg_gate_now
+    t2.observe_return(-500.0)
+    assert t2.rg_gate_now > g2 + 1e-6            # un-ratcheted re-tightens
+
+
 def test_gate_scales_logged_lambda():
     seed_everything(0)
     t = Trainer(_cfg(floor=0.5, decay=0.0, slew=1.0), obs_dim=3, action_dim=2)
