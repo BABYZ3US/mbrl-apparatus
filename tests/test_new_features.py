@@ -298,6 +298,29 @@ def test_logstd_floor_off_is_legacy_clamp():
     assert abs(t.policy.log_std_min - (-5.0)) < 1e-6           # legacy -5 clamp, untouched
 
 
+def test_lr_schedule_ties_to_lambda_exponent():
+    # cf23: model LR decays with lambda's cuberoot exponent; same t0 => lr(t) proportional to lambda(t)
+    t = Trainer(make_cfg(optim={"model_lr": 3e-4, "policy_lr": 1e-4, "value_lr": 3e-4,
+                                "lr_schedule": {"kind": "cuberoot", "t0": 100, "floor": 0.0}}),
+                obs_dim=3, action_dim=1)
+    assert t.lr_sched is not None
+    t.step = 0; t._apply_lr_schedule()
+    assert abs(t._model_lr_now - 3e-4) < 1e-12                 # lr0 at step 0
+    t.step = 700; t._apply_lr_schedule()
+    expected = 3e-4 * (100.0 / (100.0 + 700.0)) ** (1.0 / 3.0)
+    assert abs(t._model_lr_now - expected) < 1e-12             # cuberoot decay
+    assert abs(t.model_opt.param_groups[0]["lr"] - expected) < 1e-12   # optimizer lr actually set
+    # exponent + t0 match the penalty schedule (make_cfg: cuberoot, t0=100) => lr ∝ lambda
+    assert abs(t._model_lr_now / 3e-4 - t.lam(700) / t.lam.lam0) < 1e-9
+
+
+def test_lr_schedule_off_by_default():
+    t = Trainer(make_cfg(), obs_dim=3, action_dim=1)           # no lr_schedule -> off
+    assert t.lr_sched is None
+    t.step = 50000; t._apply_lr_schedule()
+    assert abs(t.model_opt.param_groups[0]["lr"] - 3e-4) < 1e-12      # legacy fixed lr, untouched
+
+
 # ---------------- auto-dosed lambda ----------------
 def test_auto_dose_computes_finite_lam0_and_resumes_bitwise(tmp_path):
     cfg = make_cfg(penalty={"auto_dose": {"enabled": True, "target_ratio": 0.1,

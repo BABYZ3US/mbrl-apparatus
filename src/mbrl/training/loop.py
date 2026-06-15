@@ -237,6 +237,19 @@ class Trainer:
         actor_params = (self.planner if self.use_planner else self.policy).parameters()
         self.policy_opt = torch.optim.AdamW(actor_params, lr=cfg.optim.policy_lr)
         self.value_opt = torch.optim.AdamW(self.value.parameters(), lr=cfg.optim.value_lr)
+        # LR tied to lambda (PM 2026-06-15): decay the MODEL learning rate with the SAME
+        # exponent as the curvature lambda(t) (cuberoot/R12), so regularization strength and
+        # model step size anneal on a matched timescale. Same t0 as the penalty schedule ⇒
+        # lr(t) ∝ lambda(t). Default kind=constant ⇒ legacy fixed lr (byte-identical).
+        _lrs = dict(cfg.optim.get("lr_schedule", {}) or {})
+        self._model_lr0 = float(cfg.optim.model_lr)
+        self._model_lr_now = self._model_lr0
+        self.lr_sched = None
+        if str(_lrs.get("kind", "constant")) != "constant":
+            self.lr_sched = LambdaSchedule(
+                kind=str(_lrs.get("kind", "cuberoot")), lam0=self._model_lr0,
+                t0=float(_lrs.get("t0", cfg.penalty.schedule.get("t0", 10000.0))),
+                floor=float(_lrs.get("floor", 0.0)))
         # imagination-latent alignment stabilizer (2507.16450) + configurable
         # actor grad-clip — the transformer-stabilization study's levers.
         self.align_weight = float(cfg.imagination.get("align_weight", 0.0))
@@ -755,6 +768,7 @@ class Trainer:
 
     # ---------------- model learning ----------------
     def model_update(self, batch) -> dict:
+        self._apply_lr_schedule()      # tie model LR to lambda's exponent (no-op when off)
         if self.dual_latent:
             return self._model_update_dual(batch)
         if self.task_dim:
@@ -1143,6 +1157,15 @@ class Trainer:
             return 0.0
         return min(max((self.ret_ema - self.ra_mid) / max(self.ra_scale, 1e-6), 0.0), 1.0)
 
+    def _apply_lr_schedule(self) -> None:
+        """Tie the model LR to lambda's exponent (PM 2026-06-15): model_opt lr = lr_sched(step)
+        (cuberoot, same exponent as lambda). No-op when off (lr stays the constant cfg value)."""
+        if self.lr_sched is None:
+            return
+        self._model_lr_now = self.lr_sched(self.step)
+        for g in self.model_opt.param_groups:
+            g["lr"] = self._model_lr_now
+
     def _apply_logstd_floor(self) -> None:
         """cf21 (PM 2026-06-15): set the policy's HARD log_std floor from rf — high (explore)
         at low return, relaxing linearly toward `lo` (commit) as return climbs. Derived
@@ -1441,7 +1464,7 @@ class Trainer:
 
         out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss.item(),
                "penalty/value": pen_val, "penalty/lambda": lam_t,
-               "penalty/return_gate": self.rg_gate_now,
+               "penalty/return_gate": self.rg_gate_now, "optim/model_lr": self._model_lr_now,
                "loss/total": loss.item(), "step": self.step,
                "latent/z_std": z.detach().std(0).mean().item(),
                **op_metrics, **dual_metrics, **frame_metrics,

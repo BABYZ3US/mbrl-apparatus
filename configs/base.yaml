@@ -391,6 +391,13 @@ optim:
   model_lr: 3.0e-4
   policy_lr: 1.0e-4
   value_lr: 3.0e-4
+  lr_schedule:          # cf23 (PM 2026-06-15): tie the MODEL lr to the curvature lambda's
+                        # exponent. constant = off (legacy fixed lr). cuberoot = model_lr *
+                        # (t0/(t0+t))^(1/3) — the SAME exponent as penalty.schedule (R12); with
+                        # the same t0, lr(t) ∝ lambda(t) so they anneal on a matched timescale.
+    kind: constant
+    t0: 10000           # match penalty.schedule.t0 for proportional lr ∝ lambda
+    floor: 0.0          # lr never decays below this
   batch_size: 256
   amp: true             # bf16 autocast for fit losses; penalty always fp32
   actor_clip: 100.0     # actor (policy/planner) grad-norm clip — a stability lever
