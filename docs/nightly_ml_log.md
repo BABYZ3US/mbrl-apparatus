@@ -4,6 +4,81 @@ Mirror of the math project's nightly verification stream. One cycle per
 night, recorded honestly. Cycle order: adjudicate → supervised experiment →
 research note.
 
+## 2026-06-15
+
+**Headline: ran cycle-2 supervised experiment (run 13 — leverage-score feature
+sampling, Bach 2017), pre-registered then adjudicated NOT SUPPORTED; the cycle-2
+SUPERVISED queue is now exhausted (candidates A, B, leverage all closed).**
+
+- Orient: `status.py` + `ledger_check.py` clean (ledger-check PASS, all runs
+  IDLE). Nothing to ADJUDICATE — gpu_spectral 6-arm done (2026-06-12), run 12B
+  done (2026-06-14), and run 10 vae_ablation STILL has no arms in results/runs
+  (remains pending, no data). So the cycle fell to priority 2, the supervised
+  experiment.
+- LIVE-REPO note: HEAD advanced a4c8842 → be8dc11 mid-session — the user's own
+  cf-series "band floor_shape" commits (configs/base.yaml, regularization/
+  rank2_frame.py + its test). None of my files were touched; I built my work
+  cleanly on top of be8dc11. The user's uncommitted rank2_frame edits were
+  committed by them during the session, so nothing of theirs was at risk.
+- Picked the cycle-2 queue's final item: leverage-score feature sampling.
+  Web-searched first (Bach 2017, JMLR v18 — leverage function in Fourier space;
+  Rudi & Rosasco 2017 — RFF generalization, data-dependent sampling improves the
+  feature count; Rudi-Camoriano-Rosasco 2018 — fast empirical-leverage sampling).
+  Implemented `spectral.ridge_leverage_scores` / `effective_dim` /
+  `leverage_sample` (label-free empirical ridge-leverage importance sampling,
+  no replacement, no column reweighting). ONE change vs champion: the feature
+  SET only — ladder + poly-band penalty + ridge + SHAPES×LAMS=12 sweep identical.
+  Harness `scripts/leverage_sample_test.py` (sha-scoped, chunked, resumable);
+  3 unit tests (leverage math vs push-through oracle + d_eff; selection bias;
+  basis resize/fit).
+- PRE-REGISTERED criteria AND hyperparameters (POOL_MULT=4, LAM_LEV=1.0 — chosen
+  on a LABEL-FREE dry run inspecting leverage CV/d_eff, no test MSE consulted)
+  and COMMITTED them (f8e9219) BEFORE running. Then ran the 20-cell harness
+  (results/bridge/f8e9219/), adjudicated, committed the adjudication.
+- Verdict: NOT SUPPORTED — 10/20 wins (not a majority), mean −3.2%, worst
+  −93.6%, fails all three bars. Re-computed independently from the cells JSONL
+  (matches the harness). Insight/discrepancy: selection WAS genuinely leverage-
+  tilted (lev_cv 1.0–2.0, not a flat-leverage null), but d_eff 5.5–116 (mean
+  12.5) ≪ M=512 in every regime — iid features already over-cover the low-rank
+  smooth signal, so concentrating the 512-feature budget by leverage hurts
+  smooth (3/10, −16.0%, owns the worst cell) and only helps where structure is
+  localized: resonant 7/10, +9.6% — the SAME resonant-only pattern as run 12B's
+  spectral filter. 5th instance of the meta-result (runs 6/8/12/12B/13): the
+  linear multi-scale frame + validated poly recipe is sufficient at matched
+  budget; smarter feature selection does not beat it. Honest scope caveat
+  recorded in the ledger: leverage's theoretical payoff is feature EFFICIENCY at
+  M ≈ d_eff ≈ 10 (a reduced-budget M-sweep), which this matched-M test does not
+  ask — a fair retry would need a NEW pre-registration.
+- Env, recorded honestly: repo `.venv` is a broken macOS symlink on this Linux
+  sandbox (as on 06-12 / 06-14). Installed the EXACT locked versions into the
+  ephemeral sandbox (torch 2.5.1, numpy 2.2.6, gymnasium 1.3.0, omegaconf/hydra/
+  joblib at pins, plus onnx>=1.16 for the policy-export tests) — a faithful repro
+  of the LOCAL CPU harness env (supervised harness is CPU-only per the execution
+  rules; NO RL training run locally). `make test` (fast) green BEFORE and AFTER
+  the change: 376 passed (373 prior + 3 new), 2 deselected. (The 2 onnx-export
+  tests fail with onnx absent and pass once installed — a sandbox dep gap, not a
+  code regression.)
+- GIT HYGIENE for the user: the mount denies `unlink` on `.git`, so both commits
+  (f8e9219 pre-register, + the adjudication commit) left stale turds it couldn't
+  clean — `.git/HEAD.lock`, `.git/objects/maintenance.lock`, and `tmp_obj_*`
+  files under `.git/objects/`. The commits DID land (I used a temp `GIT_INDEX_FILE`
+  to avoid `.git/index.lock` entirely; verified via `git log`). **On your Mac,
+  clean up with:** `rm -f .git/HEAD.lock .git/objects/maintenance.lock
+  .git/index.lock .git/refs/heads/main.lock && rm -f .git/objects/*/tmp_obj_*`.
+  Only my files were committed (spectral.py, test_spectral.py,
+  leverage_sample_test.py, claims_ledger.md, nightly_ml_log.md); `.wandb_key`
+  was never staged; nothing pushed.
+
+**Next-night pickup:** (1) the cycle-2 SUPERVISED queue is now EMPTY — next
+supervised-experiment slot needs a RESEARCH NOTE pass first (literature: random
+features / rate-distortion / multiresolution / world models, or new math-side
+structural candidates) to append 2–3 fresh candidates WITH falsifiers to the
+cycle queue; (2) the mlp-recipe anchor regression is STILL the top SCIENCE
+priority (improvement plan #1 — diff the recipe arm's effective config vs
+original report §2: smoothing.sigma 1.5 vs 1.0, eval protocol, probe count)
+before any spectral relaunch; (3) run 10 vae_ablation still needs arms pulled
+before it can be adjudicated.
+
 ## 2026-06-14
 
 **Headline: ran cycle-2 supervised experiment (run 12B — Φ-SVD shrinkage /

@@ -396,7 +396,33 @@ champion in a MAJORITY of the 20 cells, mean relative test-MSE > +2%, AND worst
 cell > −20%. FALSIFIER: bar not cleared ⇒ NOT SUPPORTED, recorded; the cycle-2
 supervised queue is then EXHAUSTED (candidates A, B, and leverage all closed)
 and the loop moves to a fresh literature pass / the RL-loop questions.
-RESULTS: pending.
+
+**RESULTS (2026-06-15, results/bridge/f8e9219/): NOT SUPPORTED — fails all
+three bars.** leverage vs champion over 20 cells: wins 10/20 (NOT a majority),
+mean −3.2%, worst cell −93.6% (smooth n=2048 s0: champion 0.0177 vs leverage
+0.0343). Selection was genuinely leverage-tilted, NOT a flat-leverage null: per-
+cell lev_cv 1.0–2.0, d_eff 5.5–116 (mean 12.5). The informative split is per-
+target — smooth: wins 3/10, mean −16.0% (champion dominates; the worst cell
+lives here); resonant: wins 7/10, mean +9.6%. Reading: the reward's effective
+dimension is small (d_eff ≪ M=512 everywhere), so at the matched budget the iid
+ladder already OVER-covers the low-rank smooth signal and concentrating the 512
+features by leverage only removes the recipe's useful even band coverage (smooth
+loses, including a near-2× worst cell); where structure is localized (resonant)
+leverage's concentration helps and it edges the recipe — the SAME resonant-only
+pattern as run 12B's spectral filter (resonant +1.0%, n=2048 +10.8%). On the
+pre-registered bar it does not ship. Per the falsifier, the cycle-2 SUPERVISED
+queue is now EXHAUSTED: candidates A (ORF, run 12 — sub-threshold), B (Φ-SVD
+shrinkage, run 12B — NOT SUPPORTED), and leverage (run 13 — NOT SUPPORTED) are
+all closed. Consistent meta-result across runs 6/8/12/12B/13: the linear multi-
+scale frame + the validated poly recipe is sufficient at matched budget;
+smarter feature selection (orthogonalization, coefficient/spectral shrinkage,
+leverage placement) does not beat it. NOT pre-registered, hypothesis-tier
+follow-up if the thread is revived: leverage's theoretical payoff is feature
+EFFICIENCY (match accuracy at M ≈ d_eff ≈ 10, far below 512) — a reduced-budget
+M-sweep, not a matched-M test, would be the fair question (new pre-registration
+required). Cycle 2's actionable supervised work is done; the loop now moves to a
+fresh literature pass and the still-open RL-loop items (run 10 vae arms; the
+mlp-recipe anchor regression).
 
 **Runs 10–11 (2026-06-08, PRE-REGISTERED — the VAE/transformer generation,
 user-proposed).**
