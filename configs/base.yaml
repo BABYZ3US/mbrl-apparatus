@@ -155,6 +155,9 @@ penalty:
                         # report sec.3: clamped +41 beat Frobenius -40; unclamped -79).
                         # 'clamped decaying trace' = this + a decaying schedule.
   penalize_dynamics: false   # R+T optional (R8/R9); NEVER add policy (R10)
+  lambda_min: 1.0e-4    # HARD floor on the EFFECTIVE lambda (PM 2026-06-15): after schedule
+                        # x disagreement_gate x return_gate, clamp lam_t >= this so the
+                        # curvature regularizer never fully releases. 0 = off (legacy).
   disagreement_gate:    # MODEL-paced lambda: scale lam(t) by the reward-head
                         # ensemble's epistemic state. Full strength while the
                         # heads disagree (model uncertain, early), released

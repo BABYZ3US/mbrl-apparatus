@@ -270,6 +270,11 @@ class Trainer:
             self.policy_ema = copy.deepcopy(self.policy).requires_grad_(False)
 
         self.lam = LambdaSchedule(**cfg.penalty.schedule)
+        # HARD floor on the EFFECTIVE penalty lambda (PM 2026-06-15): after the schedule
+        # and BOTH gates multiply, clamp lam_t >= lambda_min so the curvature regularizer
+        # never fully releases (a gate -> ~0 lets the model sharpen without bound). 0 = off.
+        # Logged as penalty/lambda (the clamped value), so it stays correlation-trackable.
+        self.lambda_min = float(cfg.penalty.get("lambda_min", 0.0) or 0.0)
         self.step = 0
         self.gen = make_generator(self.device, cfg.seed)
         # Dreamer-V3-style return scale: EMA of the lambda-returns' 5-95%
@@ -945,7 +950,7 @@ class Trainer:
         # (self.dg_gate_now, before the spectral refit so closed-form theta sees
         # it too); here it scales the Hutchinson penalty's lambda. The return-gate
         # (rg_gate_now, set on eval) composes multiplicatively — both in [floor,1].
-        lam_t = lam_t * self.dg_gate_now * self.rg_gate_now
+        lam_t = max(lam_t * self.dg_gate_now * self.rg_gate_now, self.lambda_min)  # hard floor
         if rew_loss is None:  # spectral: the MLP reward fit is skipped entirely
             loss = dyn_loss + lam_t * pen
             # ENCODER-GROUNDING AUX (2026-06-08, HalfCheetah collapse): in
@@ -1264,7 +1269,7 @@ class Trainer:
         # mode the policy latent p is meant to be ROUGH/bumpy (it carries sharp reward/
         # value structure) while the DYNAMICS latent d is kept smooth by op_d's priors
         # — so the reward-curvature penalty can be the wrong tool on p (PM 2026-06-13).
-        lam_t = self.lam(self.step) * self.rg_gate_now
+        lam_t = max(self.lam(self.step) * self.rg_gate_now, self.lambda_min)  # hard floor
         if self.dual_penalize_reward:
             if self.cfg.penalty.get("form", "frobenius") == "laplacian_trace":
                 penalty_fn = functools.partial(
