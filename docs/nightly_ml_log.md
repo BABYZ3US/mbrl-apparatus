@@ -4,6 +4,80 @@ Mirror of the math project's nightly verification stream. One cycle per
 night, recorded honestly. Cycle order: adjudicate → supervised experiment →
 research note.
 
+## 2026-06-16
+
+**Headline: research-note pass — nothing was adjudicable and the cycle-2 supervised
+queue was exhausted, so refilled the cycle-3 queue with three vetted, falsifier-bearing
+supervised candidates (+ one parked structural note). No code, no runs.**
+
+- Orient: `status.py` + `ledger_check.py` clean (ledger-check PASS, all groups IDLE).
+  ADJUDICATE found nothing actionable — gpu_spectral 6-arm done (2026-06-12), runs
+  12B/13 done (06-14/06-15), and run 10 vae_ablation STILL has no arms in results/runs
+  (confirmed: no vae / champ-vae / champion-ctl group anywhere; it is the only
+  ledger-`pending` item but is un-adjudicable without data). SUPERVISED experiment had
+  NO queued candidate — run 13 exhausted cycle-2 (A/B/leverage all closed). So the cycle
+  fell to priority 3, the research note — exactly what 2026-06-15's next-night pickup
+  predicted.
+- DELIBERATE scope: did the research note ONLY (one cycle item, not two). Did NOT also
+  start implementing the top candidate tonight — it needs new harness code (a CODE change
+  ⇒ make-test gate + full locked-env install) and the working tree already carries a prior
+  session's uncommitted "cf4-stability / operator-dynamics" experiment (configs/base.yaml,
+  models/dynamics.py, training/loop.py, models/dual_latent.py, scripts/run_ablation1.sh,
+  tests/test_cf4_stability.py, tests/test_operator_dynamics.py, + a staged
+  leverage_sample_test.py deletion). Entangling a new experiment with that would break the
+  one-change rule. Left that work exactly as found — untouched, uncommitted.
+- Literature pass (web-searched + vetted 2026-06-16) → 3 candidates appended to a new
+  "Research cycle 3 queue" section in claims_ledger.md, each chosen to AVOID the exhausted
+  "smarter feature selection at matched M=512" axis: **C3-1 [top]** reduced-budget feature-
+  EFFICIENCY M-sweep (QMC features — Yang/Sindhwani/Avron/Mahoney ICML'14 / JMLR'16;
+  Gaussian-quadrature features — Dao/De Sa/Ré NeurIPS'17) — the M ≈ d_eff "fair question"
+  runs 12/13 each flagged but never asked; **C3-2 [med]** a second-moment (eff_rank/CV)
+  penalty on the closed-form solution — a structural translation of NEW math-side notes
+  (Appendix_C_RL_derivations §C.3; sigma_scaling_and_entropy_balance), a different axis
+  (solution second-moment, not features), specced to use the Φ-SVD orthonormal frame per
+  the runs-4/12B meta-lesson; **C3-3 [low, flagged]** reverse-water-filling band allocation
+  (Cover–Thomas), recorded WITH its duplication risk against run 4's failed parameter-free
+  Wiener arm and a falsifier that must beat that arm.
+- Math-side skim (structural level only, NO claim import): the new Appendix C RL-derivations
+  note + the sigma_scaling and stein_loss notes are the on-topic ones. Translated C.3's
+  over-determination (σ and eff_rank pin different moments; a single band fill can't match
+  both) into C3-2. PARKED (off the supervised queue, logged in the ledger): the Stein/LogDet
+  operator loss (stein_loss_triangularization_rational) — it is a covariance-matching loss,
+  not a regression loss, so it belongs on the dynamics/gaussian-calibration RL axis (cf. the
+  in-progress test_operator_dynamics.py), not the supervised reward fit. Did NOT import any
+  RH / number-theory claim — those notes' RL↔NB correspondence is explicitly non-transferring
+  (Appendix B.5d), and only the optimization-level structure was translated.
+- Verify: re-ran `ledger_check.py` after the edit → still PASS (the append adds a section;
+  it removes none of the checked headline tokens). NO code changed tonight, so the
+  make-test-before/after rule is not triggered (same standing as the 2026-06-12 docs-only
+  night). Per the execution rules NO RL training was run locally; the repo `.venv` remains a
+  broken macOS symlink on this Linux sandbox — left as-is, since a docs-only night needs no
+  test run.
+- Created `docs/mbrl-project-setup.md` as the durable auto-memory file (it did not exist;
+  orient/wrap-up both reference it). Captures the recurring sandbox env quirk, the
+  git-hygiene workaround + cleanup command, where the ledger/queue/log live, the cycle
+  protocol, and the live cycle state — so future nights stop re-deriving these.
+- GIT HYGIENE (same mount issue as 06-14/06-15): `.git` denies `unlink`, and a stale
+  `.git/index.lock` is already present (a plain `git diff` warned it could not remove it).
+  Committed my docs WITHOUT touching the real index — temp `GIT_INDEX_FILE` seeded from HEAD,
+  staged ONLY my 3 doc files, `git commit-tree` + advance `refs/heads/main` — so the prior
+  session's uncommitted experiment work and the real index's stale staged state were left
+  untouched. **On your Mac, clean up the stale locks with:** `rm -f .git/index.lock
+  .git/HEAD.lock .git/refs/heads/main.lock .git/objects/maintenance.lock && rm -f
+  .git/objects/*/tmp_obj_*`. Nothing pushed. NOTE: the pre-existing uncommitted
+  "cf4-stability / operator-dynamics" changes are still in your working tree — they are NOT
+  mine and I did not commit them; commit or discard them at your discretion.
+
+**Next-night pickup:** (1) the SUPERVISED slot is now armed — pre-register and run C3-1
+(reduced-budget M-sweep; QMC + quadrature features) as the cycle-3 experiment: it needs new
+harness code (orf_shrinkage_test.py style), so make-test green before/after + the full
+locked-env install, and it is the deliberately-relaxed-matched-M budget question
+(pre-register the M-grid and the within-tol criterion BEFORE any cell). (2) the mlp-recipe
+anchor regression is STILL the top SCIENCE priority before any spectral relaunch (improvement
+plan #1). (3) run 10 vae_ablation still needs arms pulled before adjudication. (4) when the
+operator-dynamics instrumentation (in-progress in the tree) lands, the parked Stein/LogDet
+calibration term is its natural on-axis test.
+
 ## 2026-06-15
 
 **Headline: ran cycle-2 supervised experiment (run 13 — leverage-score feature
