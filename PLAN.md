@@ -110,12 +110,11 @@ with the existing project figure style):
 - **Training:** return vs env steps (per-seed + mean±CI), loss components, λ(t) overlay.
 - **Curvature diagnostics:** penalty value over training, Hutchinson probe variance vs N,
   reward-surface slices ∂²R̂ along random latent 2-planes (the "spikiness" picture, before
-  vs after regularization) — `viz/reward_surface.py`.
+  vs after regularization) — `viz/surface_export.py` (+ the Studio `reward_surface.gd` renderer).
 - **Theory checks:** transversality-angle trajectory (R8), imagined-return variance vs
   horizon curves (R15), Stone-rate log-log error-vs-n plots with predicted slope
   −2s/(2s+d) (item 7), U-curves for λ* (R14).
-- **Model graphs:** torchview/torchinfo architecture diagrams; latent-space PCA/UMAP
-  embeddings colored by reward — `viz/latent_space.py`.
+- **Model graphs:** torchview/torchinfo architecture diagrams.
 - `scripts/make_figures.py` regenerates every figure deterministically into
   `results/figures/` from **either source**: local JSONL mirrors that every run writes
   (`results/runs/<name>/metrics.jsonl`, offline-capable) or the W&B API
@@ -126,13 +125,8 @@ with the existing project figure style):
 | # | Experiment | Where | Config |
 |---|---|---|---|
 | 1 | Multi-env replication, 5 seeds × {Walker2d, Ant, Humanoid, HalfCheetahDense} | Colab GPU (Mode A), seeds parallel via sweep | `experiment/multienv.yaml` |
-| 2 | Offline RL (Minari replay datasets) | Colab GPU | `experiment/offline.yaml` |
-| 3 | Probe-count sweep N ∈ {1,2,4,8} | Pendulum: local CPU; HalfCheetah: Colab | `experiment/probes.yaml` |
-| 4 | Multi-kernel ablation R / R+T / R+T+π + α measurement | Colab GPU | `experiment/multikernel.yaml` |
-| 5 | Latent-dim sweep k ∈ {2,4,8,16,32} | Colab GPU sweep | `experiment/latentdim.yaml` |
 | 6 | Generic-vs-critical smoothness sweep (synthetic) | **local CPU** (small nets) | `experiment/smoothness.yaml` |
 | 7 | Stone-rate curves (synthetic) | **local CPU** | `experiment/stone.yaml` |
-| 8 | λ-schedule ablation: (t₀/(t₀+t))^⅓ vs step vs cosine vs constant | Pendulum local, HalfCheetah Colab | `experiment/schedule.yaml` |
 | 9 | Multi-task zero-shot generalization: task-conditioned reward, train on N tasks, eval held-out τ (interp + extrap separately); penalty over (z,a,τ) vs (z,a) vs λ=0 | PendulumTarget local, HalfCheetahVel Colab | `multitask.yaml` (own entry point `train_multitask.py`) |
 | 10 | **Gap-closing transversality test** (docs/claims_ledger.md): competent-policy data + curved (Gaussian-bump) reward; arms none/R/R+T; ≥5 seeds; success = predicted 6–25% R+T benefit AND benefit correlates with α | **local CPU** | `scripts/transversality_test.py` |
 | 11 | **Ensemble-pessimism arm** (2026-06-10): R15-safe affine deep-ensemble dynamics + disagreement discount on imagined reward; arms pessimism ∈ {0, .25, .5, 1} × members {3,5} × ≥3 seeds; success = imagined-return variance drops without eval-return regression vs champion | Pendulum local; HalfCheetah Colab/cloud | `experiment/ensemble.yaml` |
@@ -168,7 +162,7 @@ mbrl/
 │   ├── regularization/         # hutchinson.py (HVP penalty), schedule.py, transversality.py
 │   ├── training/               # loop.py, imagination.py, buffer.py, smoothing.py (DreamSmooth)
 │   ├── utils/                  # checkpoint.py, seeding.py, wandb_utils.py
-│   └── viz/                    # curves.py, reward_surface.py, latent_space.py, wandb_panels.py
+│   └── viz/                    # curves.py, surface_export.py, wandb_panels.py
 ├── scripts/
 │   ├── train.py                # Hydra entry point (GPU or CPU)
 │   ├── collect.py              # parallel env interaction (local CPU)

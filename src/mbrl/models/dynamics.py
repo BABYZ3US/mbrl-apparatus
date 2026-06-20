@@ -99,11 +99,29 @@ class OperatorDynamics(nn.Module):
     """
 
     def __init__(self, latent_dim: int, action_dim: int, hidden: int = 256,
-                 depth: int = 2, structure: str = "none", rank: int = 0):
+                 depth: int = 2, structure: str = "none", rank: int = 0,
+                 radius_min: float = 0.0, radius_max: float = 1.0,
+                 init_shift: float = 1.0):
         super().__init__()
         self.k, self.m = latent_dim, action_dim
         self.structure = str(structure)
         self.rank = int(rank)
+        # identity-shift coefficient of the near-I init: A = rawA + init_shift·I.
+        # init_shift=1 ⇒ |λ|≈1 (marginal, the default). init_shift=1/√2≈0.707 ⇒
+        # |λ|²≈1/2 at init — half the latent energy retained per step, half renewed:
+        # the critical energy/entropy ratio set at t=0 instead of discovered by a
+        # running Lyapunov penalty (PM 2026-06-15; matches the champion's |λ|≈0.726).
+        self.init_shift = float(init_shift)
+        # anti-freeze band edges for the singular-value band penalty ("svband" in
+        # structural_penalties). The FREE band [radius_min, radius_max] must lie
+        # ENTIRELY below 1 (radius_max < 1) so the only penalty-free operator is
+        # contractive: a singular value can shed the penalty ONLY by crossing the
+        # band gap from σ>1 (frozen/marginal: |λ|→1 ⇒ Lyapunov cov q/(1−|λ|²)→∞)
+        # to σ<radius_max<1. The ceiling is a NON-saturating quadratic so that gap
+        # is always crossable by descent — no vanishing-gradient trap above 1.
+        # Inert unless model.operator.w_svband>0. See docs/unified_spectral_loss.md.
+        self.radius_min = float(radius_min)
+        self.radius_max = float(radius_max)
         if self.rank > 0:
             self.U = mlp([latent_dim] + [hidden] * depth + [latent_dim * self.rank])
             self.V = mlp([latent_dim] + [hidden] * depth + [latent_dim * self.rank])
@@ -122,7 +140,7 @@ class OperatorDynamics(nn.Module):
         A = self._raw_A(z)
         if self.structure == "symmetric":
             A = 0.5 * (A + A.transpose(-1, -2))
-        A = A + torch.eye(self.k, device=z.device, dtype=z.dtype)   # near-I init
+        A = A + self.init_shift * torch.eye(self.k, device=z.device, dtype=z.dtype)  # near-(init_shift·I) init
         B = self.B(z).view(*z.shape[:-1], self.k, self.m)
         return A, B
 
@@ -149,7 +167,18 @@ class OperatorDynamics(nn.Module):
         ps = sv / sv.sum(-1, keepdim=True).clamp_min(1e-9)
         spread = (ps * ps.clamp_min(1e-9).log()).sum(-1).mean()   # = −entropy
         radius = torch.relu(sv[..., 0] - 1.0).pow(2).mean()   # σ_max ≥ ρ(A): soft bound
-        return {"normal": normal, "smooth": smooth, "spread": spread, "radius": radius}
+        # svband: anti-freeze BAND on every singular value. Ceiling relu(σ−r_max)²
+        # with r_max<1 pulls all modes below 1 — the frozen-op_d failure is σ piled
+        # at the unit circle (|λ|→1). NON-saturating quadratic ⇒ the band gap
+        # straddling σ=1 is always crossable; composed with `radius` above it is
+        # steeper for σ>1 ⇒ the crossing is one-way (>1 → <1). The free zone
+        # [r_min, r_max] sits wholly in the stable region, so a mode can become
+        # penalty-free ONLY by ending up contractive. Floor relu(r_min−σ)² = anti-
+        # collapse. Inert when radius_max≥1 and the weight is 0 (the default).
+        svband = (torch.relu(sv - self.radius_max).pow(2)
+                  + torch.relu(self.radius_min - sv).pow(2)).sum(-1).mean()
+        return {"normal": normal, "smooth": smooth, "spread": spread,
+                "radius": radius, "svband": svband}
 
     @torch.no_grad()
     def spectral_summary(self, z: Tensor) -> dict:

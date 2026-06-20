@@ -38,7 +38,8 @@ class DualLatent(nn.Module):
     def __init__(self, latent_dim: int, action_dim: int, hidden: int = 256,
                  depth: int = 2, mode: str = "shared", d_dim: int = 0,
                  p_dim: int = 0, op_structure: str = "none", op_rank: int = 0,
-                 couple_dim: int = 0):
+                 couple_dim: int = 0, op_radius_min: float = 0.0,
+                 op_radius_max: float = 1.0, op_d_init_shift: float = 1.0):
         super().__init__()
         self.mode = str(mode)
         self.k, self.m = latent_dim, action_dim
@@ -47,15 +48,21 @@ class DualLatent(nn.Module):
         # task-specific projections off the shared backbone z
         self.D = mlp([latent_dim] + [hidden] * depth + [self.d_dim])   # dynamics latent
         self.P = mlp([latent_dim] + [hidden] * depth + [self.p_dim])   # policy latent
+        # svband anti-freeze edges flow to BOTH operators; only op_d carries the
+        # weight in the twin arm (op_p stays rough via op_w_p), so op_p's band is
+        # computed but unweighted — a no-op there.
+        # op_d_init_shift sets op_d's near-I init eigenvalue (1/√2 ⇒ |λ|²=½, the
+        # critical energy ratio); op_p keeps init_shift=1 (conservative, det≈1).
+        _opkw = dict(structure=op_structure, rank=op_rank,
+                     radius_min=op_radius_min, radius_max=op_radius_max)
         if self.mode == "shared":
             # one operator, on the backbone z (dim k); d,p are readouts of z
             self.op = OperatorDynamics(latent_dim, action_dim, hidden, depth,
-                                       structure=op_structure, rank=op_rank)
+                                       init_shift=op_d_init_shift, **_opkw)
         elif self.mode == "twin":
             self.op_d = OperatorDynamics(self.d_dim, action_dim, hidden, depth,
-                                         structure=op_structure, rank=op_rank)
-            self.op_p = OperatorDynamics(self.p_dim, action_dim, hidden, depth,
-                                         structure=op_structure, rank=op_rank)
+                                         init_shift=op_d_init_shift, **_opkw)
+            self.op_p = OperatorDynamics(self.p_dim, action_dim, hidden, depth, **_opkw)
             cd = int(couple_dim) or min(self.d_dim, self.p_dim)
             self.Wd = nn.Linear(self.d_dim, cd, bias=False)
             self.Wp = nn.Linear(self.p_dim, cd, bias=False)

@@ -36,6 +36,40 @@ model:
     w_spread: 0.0       # −entropy(σ): maximize effective rank / several balanced modes
                         #              (anti mode-collapse; NOT −Var, which favors 1 dominant mode)
     w_radius: 0.0       # relu(σ_max−1)²: soft spectral-radius bound (near-marginal stability)
+    w_svband: 0.0       # Σ[relu(σ−radius_max)²+relu(radius_min−σ)²]: anti-freeze BAND on ALL
+                        # singular values. The frozen-op_d failure (σ piled at the unit circle,
+                        # |λ|→1, dead latent dynamics) — set radius_max<1 so the only penalty-
+                        # free operator is contractive, and a mode can shed penalty ONLY by
+                        # crossing the band gap from σ>1 to σ<radius_max<1 (one-way; gap
+                        # straddles σ=1, steeper above it via w_radius).
+    struct_every: 1     # PHASED SVD: run the operator structural priors (svband/normal/radius +
+                        # spectral diagnostics — all call svdvals, O(d^3)) every N-th model update,
+                        # not every one. 1 = every update (validated default). At large latent set
+                        # ~model_updates_per_iter (e.g. 200) to run the SVD once per episode. The
+                        # Stein/lyap lever (matmul-only) stays every-update regardless.
+    radius_min: 0.0     # anti-collapse floor of the svband free zone
+    radius_max: 1.0     # anti-freeze ceiling of the svband free zone — set <1 to bite (the
+                        # gap [radius_max,∞) penalizes marginal/unstable modes; =1 is inert)
+    init_shift: 1.0     # identity-shift of op_d's near-I init: A = rawA + init_shift·I.
+                        # 1 ⇒ |λ|≈1 (marginal, default). 0.70710678 (1/√2) ⇒ |λ|²≈½ at init —
+                        # the critical energy/entropy ratio set at t=0 (op_p keeps init_shift=1).
+    radius_anneal_start: 1.0   # ANNEAL the svband ceiling radius_max from this START down to
+                        # radius_max (the floor) on exp(−step/τ): the op_d energy ratio |λ|²
+                        # starts at the natural ~1 and is pulled toward radius_max² over
+                        # training, asymptotically (never reaching). Needs w_svband>0.
+    radius_anneal_tau: 0.0     # decay timescale in model-update steps (self.step). 0 = OFF
+                        # (radius_max is then the fixed ceiling). ~30000 ⇒ ceiling ≈0.53 through
+                        # the climb, ≈0.47 by 500k env-steps (self.step runs 0→100k).
+    # Gated stochastic excitation (a discrete Bernoulli phase-kick of the marginal |λ|≈1 oscillator).
+    # Per behaviour update, with prob excite_p AND only when ema z_std ∈ [anchor±band], inject
+    # process noise ε~N(0,(excite_scale·innov)²) at every imagined-rollout step (innov = EMA of the
+    # Stein innovation RMS; needs lyap_weight>0). All draws use the checkpointed RNG. Inert by default.
+    excite_enabled: false      # master switch (false ⇒ this whole block is a no-op, byte-identical)
+    excite_p: 0.2              # Bernoulli gate probability per update (the "base p = 0.2")
+    excite_zstd_anchor: 0.8    # gate opens only when ema z_std is at this attractor value
+    excite_zstd_band: 0.1      # tolerance: gate active for ema z_std ∈ [anchor−band, anchor+band]
+    excite_scale: 1.0          # noise std = excite_scale · innov_ema (innovation-matched drive)
+    excite_ema_decay: 0.99     # decay for the z_std and innovation-RMS EMAs
   dual_latent:          # dual-latent controlled-operator model (needs dynamics=operator;
                         # incompatible with spectral/ensemble). Shared encoder z splits
                         # into dynamics latent d=D(z) and policy latent p=P(z); reward/
@@ -48,6 +82,15 @@ model:
     couple_weight: 0.0  # twin: weak L_couple = ‖W_d d − W_p p‖² (ties the two geometries)
     couple_dim: 0       # 0 = min(d_dim, p_dim)
     p_consistency_weight: 1.0   # twin: ‖op_p(p,a) − P(z')‖² grounds the policy operator
+    lyap_weight: 0.0    # twin: Stein/Lyapunov consistency on op_d — ‖G − A_d G A_dᵀ − Q̂‖²
+                        # (empirical d second moment = op_d's stationary covariance given the
+                        # measured innovation). Ties op_d to the latent geometry; complements
+                        # svband (contraction + innovation must reconstruct G). 0 = off.
+    detpos_weight: 0.0  # twin: require det(op_p) > 0 — barrier relu(detpos_floor − det A_p)².
+                        # Policy operator stays invertible + orientation-preserving (GL⁺): no
+                        # control mode collapses, entropy exponent log det A_p stays finite.
+                        # The conservative-op_p counterpart to svband's dissipative-op_d. 0 = off.
+    detpos_floor: 0.05  # the positive floor det A_p must clear (the barrier knee)
     penalize_reward: true   # apply the curvature penalty (R10/R16) on the reward in
                             # p-coords. Set FALSE to let the policy latent p be ROUGH
                             # (carry sharp reward/value structure) — the "do we even
@@ -276,6 +319,10 @@ spectral:               # closed-form RFF spectral reward (models/spectral.py)
                         # as spectral/sigma_scale_k.
   init_ladder: [0.25, 0.5, 1.0, 2.0]  # sigma_w=learned initial scales
   sigma_lr: 1.0e-3      # sigma_w=learned: Adam lr on the per-block log-scales
+  exact_solve: false    # solve each head's ill-conditioned (M,M) ridge by EXACT p-adic Dixon
+                        # lifting (utils.exact_solve) instead of torch.linalg.solve — immune to the
+                        # cond~1e12 Gram, exact over ℚ. Slow (pure-Python bignum at M=n_features) ⇒
+                        # a certification path, not for production runs. false = float solve (default).
   refit_every: 200      # model updates between closed-form refits
   cache_size: 4096      # rolling (x, symlog-target) cache feeding the refit
   heads: 3              # independent frequency draws = cheap exact ensemble
@@ -443,7 +490,9 @@ checkpoint:
   keep_last: 3
   milestone_every: 100000
   resume: auto              # auto | none | <path>
-  push_wandb: true
+  push_wandb: false         # do NOT upload checkpoints as W&B artifacts (they pile up ~250/run
+                            # and have to be hand-deleted). Local checkpoints under checkpoints/
+                            # still written for resume/best; W&B holds metrics only.
 
 logging:
   project: mbrl-curvature

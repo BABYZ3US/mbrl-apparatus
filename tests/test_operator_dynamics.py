@@ -75,11 +75,63 @@ def test_structural_penalties_finite_grad_at_init():
     d = OperatorDynamics(4, 2, hidden=16, depth=1)
     z = torch.randn(16, 4)
     sp = d.structural_penalties(z)
-    assert set(sp) == {"normal", "smooth", "spread", "radius"}
+    assert set(sp) == {"normal", "smooth", "spread", "radius", "svband"}
     assert all(torch.isfinite(v) for v in sp.values())
-    (sp["normal"] + sp["smooth"] + sp["spread"] + sp["radius"]).backward()
+    sum(sp.values()).backward()
     grads = [p.grad for p in d.parameters() if p.grad is not None]
     assert grads and all(torch.isfinite(g).all() for g in grads)
+
+
+def test_svband_antifreeze_gap_is_one_way_and_crossable():
+    """svband bands ALL singular values into [radius_min, radius_max]. The design
+    contract (anti-freeze): the free zone must sit ENTIRELY below σ=1 so a mode can
+    shed penalty ONLY by crossing the gap from σ>1 to σ<radius_max<1, and the
+    ceiling is a NON-saturating quadratic so that crossing is always reachable by
+    descent (finite, nonzero gradient — no vanishing-gradient trap above 1)."""
+    seed_everything(0)
+    z = torch.randn(16, 4)
+    # A≈I at init ⇒ σ≈1. Lowering the ceiling from 1.0 to 0.9 must STRICTLY raise
+    # the penalty (the σ≈1 bulk moves from the free zone into the gap) — the ceiling
+    # bites downward, never upward.
+    sp_loose = OperatorDynamics(4, 2, 16, 1, radius_max=1.0).structural_penalties(z)["svband"]
+    d = OperatorDynamics(4, 2, 16, 1, radius_min=0.1, radius_max=0.9)
+    sp_tight = d.structural_penalties(z)["svband"]
+    assert sp_tight.item() > sp_loose.item() >= 0.0
+    # the gap is crossable: the operator params get a finite, NONZERO gradient that
+    # would drive the singular values down toward the contractive free zone.
+    sp_tight.backward()
+    g = [p.grad for p in d.parameters() if p.grad is not None]
+    assert g and all(torch.isfinite(gi).all() for gi in g)
+    assert any(gi.abs().sum().item() > 0 for gi in g)
+    # default (radius_max=1.0, weight 0) is inert: an all-contractive spectrum
+    # [0.1,0.9] would score 0 — verify the band is 0 strictly inside the free zone.
+    sv = torch.linspace(0.2, 0.8, 4)
+    free = (torch.relu(sv - 0.9).pow(2) + torch.relu(0.1 - sv).pow(2)).sum()
+    assert free.item() == 0.0
+
+
+def test_svband_trainer_smoke_and_logs():
+    """The arm path: w_svband>0 with radius_max<1 trains a step and logs op/pen_svband."""
+    seed_everything(0)
+    t = Trainer(_cfg(w_svband=0.5, radius_min=0.1, radius_max=0.9), obs_dim=3, action_dim=2)
+    m = t.model_update(_batch())
+    assert "op/pen_svband" in m and math.isfinite(m["op/pen_svband"])
+    assert m["op/pen_svband"] > 0.0          # A≈I ⇒ σ≈1 > 0.9 ⇒ the ceiling bites
+
+
+def test_init_shift_sets_half_energy_ratio():
+    """init_shift scales the near-I init: A = rawA + init_shift·I. At the near-zero
+    rawA init, the operator's singular values sit near init_shift, so init_shift=1/√2
+    gives |λ|²≈½ (the critical energy ratio) vs the default |λ|≈1 (marginal)."""
+    seed_everything(0)
+    z = torch.randn(64, 6)
+    d1 = OperatorDynamics(6, 2, 16, 1, init_shift=1.0)
+    dh = OperatorDynamics(6, 2, 16, 1, init_shift=2.0 ** -0.5)
+    s1 = torch.linalg.svdvals(d1.operators(z)[0]).mean().item()
+    sh = torch.linalg.svdvals(dh.operators(z)[0]).mean().item()
+    assert abs(s1 - 1.0) < 0.25            # default sits near |λ|≈1 (marginal)
+    assert abs(sh - 2.0 ** -0.5) < 0.25    # shifted sits near |λ|≈1/√2 ⇒ |λ|²≈½
+    assert sh < s1                          # the 1/√2 init is strictly more contractive
 
 
 def test_symmetric_structure_is_normal():

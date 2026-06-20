@@ -475,7 +475,7 @@ class SpectralReward:
     def __init__(self, in_dim: int, n_features: int = 512,
                  sigma_w: "float | list[float]" = 1.0,
                  seed: int = 0, device: str = "cpu",
-                 learn_scales: bool = False):
+                 learn_scales: bool = False, exact_solve: bool = False):
         """sigma_w: scalar bandwidth, or a list = SIGMA LADDER (sigma
         parameterized over the transform): feature block k (M/K features)
         is drawn at bandwidth sigma_w[k], giving a multi-scale frame with
@@ -510,6 +510,10 @@ class SpectralReward:
         # error ("gradients flow through the scaled pipes"). The closed-form
         # solve re-anchors c on the moved basis at each refit.
         self.learn_scales = bool(learn_scales)
+        # exact_solve: solve the (M,M) ridge by p-adic Dixon lifting (utils.exact_solve) instead of
+        # torch.linalg.solve — exact over ℚ, immune to the cond~1e12 Gram. Off by default (float path
+        # bitwise-unchanged). Slow (pure-Python bignum) ⇒ a certification tool, not a hot-path solver.
+        self.exact_solve = bool(exact_solve)
         if self.learn_scales:
             sigmas = list(sigma_w) if not isinstance(sigma_w, (int, float)) \
                 else [float(sigma_w)]
@@ -574,7 +578,12 @@ class SpectralReward:
                 weights = lam * self.w4
             weights = torch.as_tensor(weights, dtype=torch.float32, device=self.device)
             A = Phi.T @ Phi + torch.diag(weights + 1e-8)
-            self.c = torch.linalg.solve(A, Phi.T @ y)
+            rhs = Phi.T @ y
+            if self.exact_solve:                  # 2-adic head: exact ℚ solve of the ill-conditioned Gram
+                from ..utils.exact_solve import exact_solve as _exact_solve
+                self.c = _exact_solve(A, rhs)
+            else:
+                self.c = torch.linalg.solve(A, rhs)
         self.lam = float(lam) if lam is not None else None
         return self
 

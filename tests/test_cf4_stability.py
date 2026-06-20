@@ -71,6 +71,151 @@ def test_radius_p_reinstates_only_op_p_radius_prior():
     assert "op/pen_radius_p" in m and math.isfinite(m["op/pen_radius_p"])
 
 
+def test_lyap_stein_consistency_off_by_default_and_finite_when_on():
+    """Stein/Lyapunov consistency on op_d (term (c)): off by default (no metric, no
+    loss change), and when weighted it logs op/lyap_stein, trains a finite step, and
+    leaves the model_update output finite. Stable form — only second moments, so no
+    NaN even at the near-identity init."""
+    seed_everything(0)
+    t_off = Trainer(_cfg(mode="twin"), obs_dim=3, action_dim=2)
+    assert t_off.lyap_w == 0.0
+    m_off = t_off.model_update(_batch())
+    assert "op/lyap_stein" not in m_off          # inert ⇒ not even logged
+    seed_everything(0)
+    cfg = _cfg(mode="twin"); cfg.model.dual_latent.lyap_weight = 0.3
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    assert t.lyap_w == 0.3
+    m = t.model_update(_batch())
+    assert "op/lyap_stein" in m and math.isfinite(m["op/lyap_stein"]) and m["op/lyap_stein"] >= 0.0
+    assert math.isfinite(m["loss/total"])
+
+
+def _excite_cfg(p=1.0):
+    """twin + lyap (populates innov_ema via Stein) + the discrete excitation gate ON."""
+    cfg = _cfg(mode="twin")
+    cfg.model.dual_latent.lyap_weight = 0.3
+    cfg.model.operator.excite_enabled = True
+    cfg.model.operator.excite_p = p
+    cfg.model.operator.excite_zstd_anchor = 0.8
+    cfg.model.operator.excite_zstd_band = 0.1
+    cfg.model.operator.excite_scale = 1.0
+    return cfg
+
+
+def test_excite_gate_off_by_default_is_inert():
+    """excite_enabled=false ⇒ EMAs never touched, gate never fires, behaviour logs gate=0."""
+    seed_everything(0)
+    t = Trainer(_cfg(mode="twin"), obs_dim=3, action_dim=2)
+    assert t.excite_enabled is False
+    t.model_update(_batch())
+    assert t.z_std_ema is None and t.innov_ema is None       # disabled ⇒ no state churn
+    z0 = t.encoder(_batch()[0].to(t.device))
+    b = t.behaviour_update(z0)
+    assert b["excite/gate"] == 0.0 and b["excite/noise_std"] == 0.0
+
+
+def test_excite_gate_fires_in_band_and_is_finite():
+    """excite on + p=1 + ema z_std forced into band + innovation EMA populated ⇒ the gate fires,
+    injects Q-scaled rollout noise, logs gate=1 / noise_std>0, and trains a finite behaviour step."""
+    seed_everything(0)
+    t = Trainer(_excite_cfg(p=1.0), obs_dim=3, action_dim=2)
+    assert t.excite_enabled and t.excite_p == 1.0
+    for _ in range(3):                                       # populate innov_ema (Stein) + z_std_ema
+        t.model_update(_batch())
+    assert t.innov_ema is not None and t.innov_ema > 0.0 and t.z_std_ema is not None
+    t.z_std_ema = t.excite_zstd_anchor                       # force the operating-point gate condition
+    b = t.behaviour_update(t.encoder(_batch()[0].to(t.device)))
+    assert b["excite/gate"] == 1.0 and b["excite/noise_std"] > 0.0
+    assert math.isfinite(b["loss/policy"]) and math.isfinite(b["loss/value"])
+
+
+def test_excite_gate_respects_zstd_band():
+    """Gate stays SHUT when ema z_std is outside [anchor±band], even at p=1 (operating-point only)."""
+    seed_everything(0)
+    t = Trainer(_excite_cfg(p=1.0), obs_dim=3, action_dim=2)
+    for _ in range(3):
+        t.model_update(_batch())
+    t.z_std_ema = t.excite_zstd_anchor + 5 * t.excite_zstd_band   # far outside the band
+    b = t.behaviour_update(t.encoder(_batch()[0].to(t.device)))
+    assert b["excite/gate"] == 0.0 and b["excite/noise_std"] == 0.0
+
+
+def test_detpos_op_p_constraint_off_by_default_and_finite_when_on():
+    """det(op_p) > 0 barrier: off by default (no metric, no loss change). When
+    weighted it logs op/det_p_mean (≈1 at the near-identity init), op/det_p_negfrac
+    (0 — op_p starts orientation-preserving so the barrier is inactive), and trains
+    finite. det is real even though op_p can be rotational (eigenvalues pair up)."""
+    seed_everything(0)
+    t_off = Trainer(_cfg(mode="twin"), obs_dim=3, action_dim=2)
+    assert t_off.detpos_w == 0.0
+    assert "op/det_p_mean" not in t_off.model_update(_batch())
+    seed_everything(0)
+    cfg = _cfg(mode="twin"); cfg.model.dual_latent.detpos_weight = 5.0
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    assert t.detpos_w == 5.0
+    m = t.model_update(_batch())
+    assert "op/det_p_mean" in m and math.isfinite(m["op/det_p_mean"])
+    assert math.isfinite(m["op/detpos"]) and m["op/detpos"] >= 0.0
+    assert m["op/det_p_negfrac"] == 0.0       # A_p ≈ I at init ⇒ det ≈ 1 > 0
+    assert math.isfinite(m["loss/total"])
+
+
+def test_radius_anneal_decays_ceiling_toward_floor_without_reaching():
+    """radius_anneal: the svband ceiling decays radius_anneal_start→radius_max (floor)
+    on exp(−step/τ), asymptotically — starts at 1, nears the floor far out but never
+    reaches; op_d tracks it, op_p is untouched; logs op/radius_ceil."""
+    seed_everything(0)
+    cfg = _cfg(mode="twin")
+    cfg.model.operator.radius_max = 0.4472136
+    cfg.model.operator.w_svband = 5.0
+    cfg.model.operator.radius_anneal_start = 1.0
+    cfg.model.operator.radius_anneal_tau = 1000.0
+    t = Trainer(cfg, obs_dim=3, action_dim=2)
+    floor, start = 0.4472136, 1.0
+    op_p_before = t.dual.op_p.radius_max
+    t.step = 0; t._anneal_operator_radius()
+    assert abs(t.dual.op_d.radius_max - start) < 1e-6        # starts at 1
+    t.step = 3000; t._anneal_operator_radius()
+    assert floor < t.dual.op_d.radius_max < 0.6             # descending, exp(−3)≈0.05
+    t.step = 7000; t._anneal_operator_radius()              # 7τ ⇒ exp(−7)≈9e-4, representable
+    assert floor < t.dual.op_d.radius_max < floor + 1e-3    # near floor, NOT reaching
+    assert t.dual.op_p.radius_max == op_p_before            # anneal touches op_d only
+    m = t.model_update(_batch())
+    assert "op/radius_ceil" in m and math.isfinite(m["op/radius_ceil"])
+
+
+def test_struct_every_amortizes_svd_keeps_lyap_every_update(monkeypatch):
+    """Phased SVD: struct_every=N runs the O(d^3) operator structural priors (svdvals) only every
+    N-th update, while the matmul-only Stein/lyap lever stays every-update; struct_every=1 is the
+    unchanged validated path."""
+    import torch
+    real = torch.linalg.svdvals
+
+    def count_svd(every, updates=8):
+        seed_everything(0)
+        cfg = _cfg(mode="twin", w_normal=0.1)
+        cfg.model.operator.struct_every = every
+        cfg.model.dual_latent.lyap_weight = 0.3
+        t = Trainer(cfg, obs_dim=3, action_dim=2)
+        assert t.struct_every == every
+        c = {"n": 0}
+        monkeypatch.setattr(torch.linalg, "svdvals", lambda *a, **k: (c.__setitem__("n", c["n"] + 1), real(*a, **k))[1])
+        t.step = 0
+        lyap_each = []
+        for _ in range(updates):
+            m = t.model_update(_batch())
+            lyap_each.append("op/lyap_stein" in m)
+        monkeypatch.setattr(torch.linalg, "svdvals", real)
+        return c["n"], all(lyap_each), m
+
+    n1, lyap1, m1 = count_svd(1)
+    n4, lyap4, m4 = count_svd(4)
+    assert n1 > 0 and n4 < n1                 # phasing reduces svdvals calls
+    assert n4 <= n1 // 3 + 2                   # ~1/4 the calls (every=4 -> struct on steps 0,4 of 8)
+    assert lyap1 and lyap4                     # lyap computed on EVERY update in both
+    assert "op/pen_normal_d" in m4             # diagnostics still logged (from cache) when skipped
+
+
 def test_reward_clip_bounds_imagined_reward():
     seed_everything(0)
     t = Trainer(_cfg(reward_clip=0.5), obs_dim=3, action_dim=2)
