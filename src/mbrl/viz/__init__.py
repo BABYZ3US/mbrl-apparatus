@@ -1,6 +1,6 @@
 """Viz package — LAZY submodule access (PEP 562).
 
-curves/reward_surface/latent_space need matplotlib (the `analysis` extra,
+curves needs matplotlib (the `analysis` extra,
 deliberately absent from CI and the sealed image); surface_export is
 stdlib+numpy and ships inside the seal. Eager imports here made importing
 ANY viz module require matplotlib — caught by CI run 1, invisible locally
@@ -9,7 +9,7 @@ access; `from mbrl.viz import curves` still works unchanged.
 """
 import importlib
 
-_SUBMODULES = ("curves", "reward_surface", "latent_space", "surface_export")
+_SUBMODULES = ("curves", "surface_export")
 
 
 def __getattr__(name: str):

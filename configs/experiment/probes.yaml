@@ -1,5 +1,0 @@
-# @package _global_
-# Validation item 3 — probe-count vs accuracy/compute frontier (R4).
-experiment:
-  name: probes
-# sweep: penalty.n_probes in {1, 2, 4, 8}

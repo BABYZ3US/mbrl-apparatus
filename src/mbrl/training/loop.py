@@ -68,6 +68,9 @@ class Trainer:
         self.dyn_stochastic = _dyn_kind == "gaussian"
         self.dyn_operator = _dyn_kind == "operator"
         self.op_w = {}   # operator structural-prior weights (set below if operator)
+        self.rad_anneal_tau = 0.0   # svband-ceiling anneal off unless set in operator cfg
+        self.struct_every = 1       # phased SVD: structural priors every Nth update (1 = every)
+        self._op_metrics_cache = {} # last computed operator diagnostics (logged on skipped steps)
         dyn_cls = {"affine": AffineDynamics, "gaussian": GaussianAffineDynamics,
                    "mlp": FullMLPDynamics, "operator": OperatorDynamics}[_dyn_kind]
         if _dyn_kind == "mlp":
@@ -93,9 +96,23 @@ class Trainer:
             self.dynamics = OperatorDynamics(
                 k, action_dim, h, d,
                 structure=str(_op.get("structure", "none")),
-                rank=int(_op.get("rank", 0))).to(device)
+                rank=int(_op.get("rank", 0)),
+                radius_min=float(_op.get("radius_min", 0.0)),
+                radius_max=float(_op.get("radius_max", 1.0)),
+                init_shift=float(_op.get("init_shift", 1.0))).to(device)
             self.op_w = {kk: float(_op.get(f"w_{kk}", 0.0))
-                         for kk in ("normal", "smooth", "spread", "radius")}
+                         for kk in ("normal", "smooth", "spread", "radius", "svband")}
+            # annealed svband ceiling: radius_max decays radius_anneal_start → radius_max
+            # (the floor) over self.step (op_d only; applied each model_update).
+            self.rad_anneal_tau = float(_op.get("radius_anneal_tau", 0.0) or 0.0)
+            self.rad_anneal_start = float(_op.get("radius_anneal_start", 1.0))
+            self.rad_anneal_floor = float(_op.get("radius_max", 1.0))
+            self.struct_every = max(1, int(_op.get("struct_every", 1)))
+            if self.op_w["svband"] > 0.0 and float(_op.get("radius_max", 1.0)) >= 1.0:
+                import warnings as _w3
+                _w3.warn("[operator] w_svband>0 with radius_max>=1: the free band is "
+                         "not entirely below σ=1, so the anti-freeze gap is not one-way "
+                         "(modes can sit at/above marginal). Set operator.radius_max<1.")
         else:
             self.dynamics = dyn_cls(k, action_dim, h, d).to(device)
         # epistemic discount on imagined reward: r -= coef * ensemble disagreement
@@ -125,9 +142,23 @@ class Trainer:
                 d_dim=int(_dl.get("d_dim", 0)), p_dim=int(_dl.get("p_dim", 0)),
                 op_structure=str(cfg.model.get("operator", {}).get("structure", "none")),
                 op_rank=int(cfg.model.get("operator", {}).get("rank", 0)),
+                op_radius_min=float(cfg.model.get("operator", {}).get("radius_min", 0.0)),
+                op_radius_max=float(cfg.model.get("operator", {}).get("radius_max", 1.0)),
+                op_d_init_shift=float(cfg.model.get("operator", {}).get("init_shift", 1.0)),
                 couple_dim=int(_dl.get("couple_dim", 0))).to(device)
             self.couple_w = float(_dl.get("couple_weight", 0.0))
             self.pconsist_w = float(_dl.get("p_consistency_weight", 1.0))
+            # Lyapunov/Stein consistency on op_d (twin): force the empirical d
+            # second moment to be op_d's stationary covariance, G = A G Aᵀ + Q̂
+            # (term (c), docs/unified_spectral_loss.md). 0 = off (default).
+            self.lyap_w = float(_dl.get("lyap_weight", 0.0))
+            # det(op_p) > 0 (twin): require the POLICY operator to be invertible AND
+            # orientation-preserving — a soft barrier relu(floor − det A_p)². Keeps op_p
+            # in GL⁺ (no policy mode collapses, no orientation flip) so its entropy
+            # exponent log det A_p stays finite. The conservative-op_p counterpart to
+            # svband's dissipative-op_d. 0 = off (default).
+            self.detpos_w = float(_dl.get("detpos_weight", 0.0))
+            self.detpos_floor = float(_dl.get("detpos_floor", 0.05))
             # reward-curvature penalty on p: optional (twin wants p ROUGH — see
             # _model_update_dual). Per-operator structural weights let the dynamics
             # operator op_d be regularized smooth while the policy operator op_p is
@@ -135,7 +166,7 @@ class Trainer:
             self.dual_penalize_reward = bool(_dl.get("penalize_reward", True))
             # smooth_p: regularize op_p like op_d (conjoined) or leave p rough (separate)
             self.op_w_p = (dict(self.op_w) if bool(_dl.get("smooth_p", True))
-                           else {kk: 0.0 for kk in ("normal", "smooth", "spread", "radius")})
+                           else {kk: 0.0 for kk in self.op_w})
             # cf4: even with p left ROUGH (smooth_p=false ⇒ no normal/smooth/spread
             # priors), optionally BOUND op_p's spectral radius so imagined p-rollouts
             # can't diverge (the NaN root cause). radius_p>0 reinstates ONLY the radius
@@ -339,6 +370,23 @@ class Trainer:
         self.lambda_min = float(cfg.penalty.get("lambda_min", 0.0) or 0.0)
         self.step = 0
         self.gen = make_generator(self.device, cfg.seed)
+        # Gated stochastic excitation (model.operator.excite_*): a discrete Bernoulli(excite_p)
+        # gate per behaviour update, OPEN only when the latent sits at its attractor (ema z_std
+        # within excite_zstd_band of excite_zstd_anchor). When open, inject process noise
+        # ε~N(0,(excite_scale·innov)²) at EVERY imagined-rollout step — a parametric drive of the
+        # marginal oscillator pinned at |λ|≈1, to phase-kick it toward the firing basin. innov =
+        # EMA of the Stein-innovation RMS √(tr Q̂/k); z_std_ema = EMA of latent z_std. Inert unless
+        # excite_enabled (every existing arm + checkpoint byte-identical). All draws use self.gen
+        # (checkpointed) for bitwise resume. PM 2026-06-16 (discrete-gate Q-drive of the edge cycle).
+        _opx = dict(cfg.model.get("operator", {}) or {})
+        self.excite_enabled = bool(_opx.get("excite_enabled", False))
+        self.excite_p = float(_opx.get("excite_p", 0.2))
+        self.excite_zstd_anchor = float(_opx.get("excite_zstd_anchor", 0.8))
+        self.excite_zstd_band = float(_opx.get("excite_zstd_band", 0.1))
+        self.excite_scale = float(_opx.get("excite_scale", 1.0))
+        self.excite_decay = float(_opx.get("excite_ema_decay", 0.99))
+        self.z_std_ema = None      # checkpointed; EMA of latent z_std (the excite gate anchor)
+        self.innov_ema = None      # checkpointed; EMA of Stein innovation RMS (the excite scale)
         # Dreamer-V3-style return scale: EMA of the lambda-returns' 5-95%
         # range; policy gradient uses returns / max(1, scale). Fixes the
         # iteration-6 imagined-return variance explosion (analysis_multitask_01
@@ -450,6 +498,10 @@ class Trainer:
             spec_in = k + action_dim + task_dim
             self.spec_nf = int(sp.get("n_features", 512))
             self.spec_nheads = int(sp.get("heads", 3))
+            # 2-adic head: solve each head's ill-conditioned (M,M) ridge by exact p-adic Dixon
+            # lifting (utils.exact_solve) instead of torch.linalg.solve. Off by default. Slow
+            # (pure-Python bignum) at M=n_features ⇒ a certification path, not for fast runs.
+            self.spec_exact_solve = bool(sp.get("exact_solve", False))
             sw = sp.get("sigma_w", 1.0)
             if isinstance(sw, str) and sw == "learned":
                 # LEARNED scales (user, 2026-06-08): no manual clamp — init at
@@ -539,7 +591,8 @@ class Trainer:
             spec_in = self.encoder.latent_dim + self.dynamics.m + self.task_dim
         return [SpectralReward(spec_in, n_features=self.spec_nf, sigma_w=sigma_w,
                                seed=int(self.cfg.seed) * 1000 + i,
-                               device=str(self.device), learn_scales=learn)
+                               device=str(self.device), learn_scales=learn,
+                               exact_solve=self.spec_exact_solve)
                 for i in range(self.spec_nheads)]
     def _spectral_band_weights(self, head, t: int) -> torch.Tensor:
         """Per-feature ridge weights at model-update time t:
@@ -784,17 +837,34 @@ class Trainer:
         return term, {"frame/bal_w_align": wa, "frame/bal_w_energy": we,
                       "frame/bal_align": a_mag, "frame/bal_energy": e_mag}
 
+    def _anneal_operator_radius(self):
+        """Anneal the svband ceiling radius_max from rad_anneal_start → rad_anneal_floor
+        on exp(−step/τ) — asymptotic, never reaching the floor. The op_d energy ratio
+        |λ|² rides the natural ~1 early (where the dynamics fit wants it) and is pulled
+        toward floor² over training, so a persistent descending target can't be undone
+        the way a one-shot init was. op_d only; op_p stays conservative. No-op when τ≤0;
+        deterministic in self.step ⇒ no checkpoint state and bitwise-exact on resume."""
+        if self.rad_anneal_tau <= 0.0:
+            return
+        rm = self.rad_anneal_floor + (self.rad_anneal_start - self.rad_anneal_floor) * \
+            float(np.exp(-self.step / self.rad_anneal_tau))
+        self._radius_ceil = rm
+        if self.dual_latent and self.dual is not None and getattr(self.dual, "op_d", None) is not None:
+            self.dual.op_d.radius_max = rm
+        elif self.dyn_operator:
+            self.dynamics.radius_max = rm
+
     # ---------------- model learning ----------------
-    def model_update(self, batch) -> dict:
-        self._apply_lr_schedule()      # tie model LR to lambda's exponent (no-op when off)
-        if self.dual_latent:
-            return self._model_update_dual(batch)
+    def _encode_batch(self, batch):
+        """Shared model-update prologue: batch -> device, optional VAE encode, EMA
+        target. Returns (obs, a, r, obs_next, tau, z, z_next_tgt, vae_terms, vae_metrics).
+        Identical for the primary and dual-latent paths (no self.gen draws)."""
         if self.task_dim:
             obs, a, r, obs_next, tau = (x.to(self.device) for x in batch)
         else:
             obs, a, r, obs_next = (x.to(self.device) for x in batch)
             tau = None
-        vae_terms = None
+        vae_terms = vae_metrics = None
         if self.enc_vae:   # one forward: recon + KL + the z sample
             recon, kl, z = self.encoder.losses(obs)
             vae_terms = self.vae_recon_w * recon + self.vae_beta * kl
@@ -803,6 +873,60 @@ class Trainer:
             z = self.encoder(obs)
         with torch.no_grad():
             z_next_tgt = self.ema(obs_next)
+        return obs, a, r, obs_next, tau, z, z_next_tgt, vae_terms, vae_metrics
+
+    def _reward_target(self, r):
+        """Reward fit target: symlog(r) when model.symlog_reward is on, else r.
+        Also tracks the running max |symlog(r)| over real batches (symlog_bound,
+        checkpointed) that bounds the imagination symexp clamp. Byte-identical in
+        the primary and dual-latent paths; no self.gen draws."""
+        r_target = symlog(r) if self.symlog else r
+        if self.symlog:  # track the real-data symlog range for the imagination clamp
+            batch_max = r_target.abs().max().item()
+            if np.isfinite(batch_max):  # NaN hygiene: never poison the bound
+                self.symlog_bound = max(self.symlog_bound, batch_max)
+        return r_target
+
+    def _model_step(self, loss, pen_val) -> bool:
+        """Shared model-optimizer epilogue for both model_update paths: zero_grad,
+        backward, clip the ENCODER grad to 100, optionally skip the step when the
+        full model grad-norm is non-finite (skip_nonfinite, default False ⇒ the
+        unconditional step below is byte-identical to the legacy primary), step,
+        EMA-update the encoder, advance self.step, then update the adaptive-horizon
+        penalty EMA/peak. Returns whether the optimizer stepped. No self.gen draws
+        (the non-finite guard is a measure-only inf-norm). Keep every ratchet/EMA
+        scalar update at the same control-flow point as before."""
+        import math as _math
+        self.model_opt.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 100.0)
+        _stepped = True
+        if self.skip_nonfinite:   # cf4: a NaN model loss must not poison the weights
+            _mnorm = torch.nn.utils.clip_grad_norm_(
+                (pp for g in self.model_opt.param_groups for pp in g["params"]),
+                float("inf"))     # measure-only (inf ⇒ no extra clip beyond the encoder)
+            _stepped = bool(torch.isfinite(_mnorm))
+            if not _stepped:
+                self._nonfinite_skips += 1
+        if _stepped:
+            self.model_opt.step()
+            self.ema.update(self.encoder)
+        self.step += 1
+        # penalty EMA + running peak — the adaptive-horizon certificate signal.
+        # NaN hygiene: one non-finite penalty value must not poison the EMA
+        # forever (a poisoned EMA crashed the horizon controller in the shiny run).
+        if _math.isfinite(pen_val):
+            self.pen_ema = (pen_val if self.pen_ema is None
+                            else self.ah_decay * self.pen_ema + (1 - self.ah_decay) * pen_val)
+            self.pen_peak = max(self.pen_peak, self.pen_ema)
+        return _stepped
+
+    def model_update(self, batch) -> dict:
+        self._apply_lr_schedule()      # tie model LR to lambda's exponent (no-op when off)
+        self._anneal_operator_radius()  # decay the svband ceiling toward radius_max (no-op when off)
+        if self.dual_latent:
+            return self._model_update_dual(batch)
+        obs, a, r, obs_next, tau, z, z_next_tgt, vae_terms, vae_metrics = self._encode_batch(batch)
 
         dyn_calib = {}
         if self.dyn_stochastic:   # Gaussian NLL on the transition distribution
@@ -834,11 +958,7 @@ class Trainer:
                 dyn_loss = F.mse_loss(self.dynamics(z, a), z_next_tgt)
         # reward model predicts symlog(r) when model.symlog_reward is on;
         # imagination applies symexp to whatever it consumes (behaviour_update)
-        r_target = symlog(r) if self.symlog else r
-        if self.symlog:  # track the real-data symlog range for the imagination clamp
-            batch_max = r_target.abs().max().item()
-            if np.isfinite(batch_max):  # NaN hygiene: never poison the bound
-                self.symlog_bound = max(self.symlog_bound, batch_max)
+        r_target = self._reward_target(r)
         # disagreement-gated lambda (penalty.disagreement_gate): compute the
         # gate HERE — before the spectral refit below reads self.dg_gate_now via
         # the closed-form theta weights, so champion/spectral are gated too (not
@@ -1054,21 +1174,8 @@ class Trainer:
                 loss = loss + sum(self.op_w[kk] * sp[kk] for kk in self.op_w)
                 op_metrics |= {f"op/pen_{kk}": float(sp[kk].detach()) for kk in sp}
 
-        self.model_opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 100.0)
-        self.model_opt.step()
-        self.ema.update(self.encoder)
-        self.step += 1
-
-        # penalty EMA + running peak — the adaptive-horizon certificate signal.
-        # NaN hygiene: one non-finite penalty value must not poison the EMA
-        # forever (a poisoned EMA crashed the horizon controller in the shiny run).
-        import math as _math
-        if _math.isfinite(pen_val):
-            self.pen_ema = (pen_val if self.pen_ema is None
-                            else self.ah_decay * self.pen_ema + (1 - self.ah_decay) * pen_val)
-            self.pen_peak = max(self.pen_peak, self.pen_ema)
+        import math as _math   # used by the channel-capacity diagnostics below
+        self._model_step(loss, pen_val)   # zero_grad/backward/clip/step/ema/step++/pen_ema
 
         # ---- latent-as-channel diagnostics (rate-distortion / IB frontier) ----
         # rate  = E KL(q_φ(z|x) ‖ N(0,I)) >= I(x;z)  (only defined for the VAE
@@ -1270,6 +1377,8 @@ class Trainer:
             flat = zs.reshape(-1, zs.shape[-1])
             tgt_tau = tau0.repeat(H + 1, 1) if tau0 is not None else None
             v_tgt = self.value_target(flat, tgt_tau).reshape(H + 1, -1)
+            if self.double_value:   # A4: min(V1,V2) clipped-double-value bootstrap
+                v_tgt = torch.minimum(v_tgt, self.value2_target(flat, tgt_tau).reshape(H + 1, -1))
         # advantage estimator: "lambda" (default, unchanged) | "gae" (Schulman 2016,
         # the PPO/A2C standard). Both share gamma/lambda_; GAE's value target
         # (adv + v) IS the lambda-return (pinned by test_returns_gae), so the value
@@ -1280,6 +1389,10 @@ class Trainer:
         else:
             returns = lambda_returns(rs, v_tgt, gamma, lam_ret)       # (H, B)
             adv = None
+        if self.return_clip > 0.0:   # cf4: hard-bound the λ-returns (and GAE advantage)
+            returns = returns.clamp(-self.return_clip, self.return_clip)  # so a diverged
+            if adv is not None:                                           # imagined rollout
+                adv = adv.clamp(-self.return_clip, self.return_clip)      # can't NaN the loss
 
         # --- return normalization (Dreamer-V3): scale-invariant policy gradient
         with torch.no_grad():
@@ -1318,7 +1431,10 @@ class Trainer:
         pi_loss.backward()
         actor = self.planner if self.use_planner else self.policy
         gnorm = torch.nn.utils.clip_grad_norm_(actor.parameters(), clip_eff)
-        self.policy_opt.step()
+        if (not self.skip_nonfinite) or torch.isfinite(gnorm):   # cf4: don't poison θ_π
+            self.policy_opt.step()
+        else:
+            self._nonfinite_skips += 1
 
         # --- value: regress to lambda-returns on detached latents ---
         flat = zs[:-1].detach().reshape(-1, zs.shape[-1])
@@ -1327,13 +1443,33 @@ class Trainer:
         v_loss = F.mse_loss(v, returns.detach())
         self.value_opt.zero_grad(set_to_none=True)
         v_loss.backward()
-        self.value_opt.step()
+        if self.value_clip > 0.0 or self.skip_nonfinite:   # cf4: clip the value grad
+            vnorm = torch.nn.utils.clip_grad_norm_(       # (was unclipped) + skip on NaN
+                self.value.parameters(),
+                self.value_clip if self.value_clip > 0.0 else float("inf"))
+            if (not self.skip_nonfinite) or torch.isfinite(vnorm):
+                self.value_opt.step()
+            else:
+                self._nonfinite_skips += 1
+        else:
+            self.value_opt.step()
 
         # --- EMA target value + (optional) EMA policy ---
         decay = cfg_i.get("value_target_decay", 0.98)
         with torch.no_grad():
             for pt, p in zip(self.value_target.parameters(), self.value.parameters()):
                 pt.lerp_(p, 1.0 - decay)
+        if self.double_value:   # A4: train + EMA the second value net on the same λ-targets
+            v2 = self.value2(flat, v_tau).reshape(H, -1)
+            v2_loss = F.mse_loss(v2, returns.detach())
+            self.value2_opt.zero_grad(set_to_none=True); v2_loss.backward()
+            v2n = torch.nn.utils.clip_grad_norm_(self.value2.parameters(),
+                    self.value_clip if self.value_clip > 0.0 else float("inf"))
+            if (not self.skip_nonfinite) or torch.isfinite(v2n):
+                self.value2_opt.step()
+            with torch.no_grad():
+                for pt, pp in zip(self.value2_target.parameters(), self.value2.parameters()):
+                    pt.lerp_(pp, 1.0 - decay)
         self._update_policy_ema()
 
         return {"loss/value": v_loss.item(), "loss/policy": pi_loss.item(),
@@ -1344,6 +1480,7 @@ class Trainer:
                 "imagine/return_mean": returns.mean().item(),
                 "imagine/return_var": returns.var().item(),  # R15 diagnostic
                 "imagine/align": align_val, "actor/grad_norm": float(gnorm),
+                "stab/nonfinite_skips": self._nonfinite_skips,  # cf4: same diagnostic as the dual path
                 **pen_stats}
 
     # ---------------- dual-latent path (model.dual_latent.enabled) ----------------
@@ -1353,20 +1490,7 @@ class Trainer:
         R16, now in p-coords). Twin mode also fits op_p (p-consistency) and the weak
         coupling L_couple. No spectral/auto-dose/dgate — a clean fresh arm."""
         import functools, math as _math
-        if self.task_dim:
-            obs, a, r, obs_next, tau = (x.to(self.device) for x in batch)
-        else:
-            obs, a, r, obs_next = (x.to(self.device) for x in batch)
-            tau = None
-        vae_terms = vae_metrics = None
-        if self.enc_vae:
-            recon, kl, z = self.encoder.losses(obs)
-            vae_terms = self.vae_recon_w * recon + self.vae_beta * kl
-            vae_metrics = {"vae/recon": recon.item(), "vae/kl": kl.item()}
-        else:
-            z = self.encoder(obs)
-        with torch.no_grad():
-            z_next_tgt = self.ema(obs_next)
+        obs, a, r, obs_next, tau, z, z_next_tgt, vae_terms, vae_metrics = self._encode_batch(batch)
         dl = self.dual
         d, p = dl.d_of(z), dl.p_of(z)
         with torch.no_grad():
@@ -1380,11 +1504,7 @@ class Trainer:
             dyn_loss = F.mse_loss(dl.op_d(d, a), d_next)
 
         # reward fit in p-coords
-        r_target = symlog(r) if self.symlog else r
-        if self.symlog:
-            bm = r_target.abs().max().item()
-            if np.isfinite(bm):
-                self.symlog_bound = max(self.symlog_bound, bm)
+        r_target = self._reward_target(r)
         rew_loss = F.mse_loss(self.reward(p, a, tau), r_target)
 
         # isotropic curvature penalty on the reward, in p-coords (R10/R16; detached p).
@@ -1421,16 +1541,69 @@ class Trainer:
         # dynamics space can be regularized SMOOTH while the policy space is left
         # ROUGH (e.g. op_w.w_smooth>0, op_w_p.w_smooth=0).
         op_metrics = {}
-        for i, op in enumerate(dl.operators()):
-            tag = "" if dl.mode == "shared" else ("_d" if i == 0 else "_p")
-            zin = z.detach() if dl.mode == "shared" else (
-                d.detach() if i == 0 else p.detach())
-            w = self.op_w_p if (dl.mode == "twin" and i == 1) else self.op_w
-            op_metrics |= {f"{kk}{tag}": vv for kk, vv in op.spectral_summary(zin).items()}
-            if any(w.values()):
-                sp = op.structural_penalties(zin)
-                loss = loss + sum(w[kk] * sp[kk] for kk in w)
-                op_metrics |= {f"op/pen_{kk}{tag}": float(sp[kk].detach()) for kk in sp}
+        if self.rad_anneal_tau > 0.0:
+            op_metrics["op/radius_ceil"] = getattr(self, "_radius_ceil", self.rad_anneal_floor)
+        # PHASED SVD (model.operator.struct_every): spectral_summary + structural_penalties both
+        # call svdvals(A) — O(d^3), the dominant cost at large latent. Run them only every
+        # struct_every-th update (=once per episode when set to model_updates_per_iter), caching
+        # the diagnostics so they still log each iteration. The Stein/lyap lever below is
+        # matmul-only and stays every-update. struct_every=1 ⇒ unchanged validated behaviour.
+        if self.step % self.struct_every == 0:
+            _cache = {}
+            for i, op in enumerate(dl.operators()):
+                tag = "" if dl.mode == "shared" else ("_d" if i == 0 else "_p")
+                zin = z.detach() if dl.mode == "shared" else (
+                    d.detach() if i == 0 else p.detach())
+                w = self.op_w_p if (dl.mode == "twin" and i == 1) else self.op_w
+                _cache |= {f"{kk}{tag}": vv for kk, vv in op.spectral_summary(zin).items()}
+                if any(w.values()):
+                    sp = op.structural_penalties(zin)
+                    loss = loss + sum(w[kk] * sp[kk] for kk in w)
+                    _cache |= {f"op/pen_{kk}{tag}": float(sp[kk].detach()) for kk in sp}
+            self._op_metrics_cache = _cache
+        op_metrics |= self._op_metrics_cache
+
+        # Lyapunov/Stein consistency on op_d (model.dual_latent.lyap_weight>0): the
+        # empirical d second moment G must be op_d's STATIONARY covariance given the
+        # measured innovation — the discrete Stein equation G = A G Aᵀ + Q̂. Forces
+        # op_d to be a faithful forward model on the ACTUAL latent geometry (term (c)
+        # of docs/unified_spectral_loss.md), and complements svband: the contraction
+        # (svband) plus the innovation Q̂ must reconstruct G, so op_d can be neither
+        # frozen NOR inconsistent. Stable: only second moments + matmuls — no
+        # eigendecomposition, no Lyapunov solve. Twin only (op_d rolls d-space).
+        if self.lyap_w > 0.0 and dl.mode == "twin":
+            A_d, _ = dl.op_d.operators(d)                  # (N,k,k) per-sample operator
+            yhat = (A_d @ d.unsqueeze(-1)).squeeze(-1)     # autonomous prop A_d(d)·d (a=0)
+            N_ = float(d.shape[0])
+            G = d.t() @ d / N_                             # current d second moment (k,k)
+            S_auto = yhat.t() @ yhat / N_                  # E[A d dᵀ Aᵀ] (state-dep-correct)
+            R = d_next - dl.op_d(d, a)                     # full dynamics innovation (d_next detached)
+            Q_hat = R.t() @ R / N_                         # innovation covariance
+            if self.excite_enabled:                        # EMA of innovation RMS √(tr Q̂/k) = the excite drive scale
+                q_rms = float((Q_hat.diagonal().clamp_min(0.0).sum() / Q_hat.shape[0]).sqrt().detach())
+                if _math.isfinite(q_rms):
+                    self.innov_ema = (q_rms if self.innov_ema is None
+                                      else self.excite_decay * self.innov_ema + (1 - self.excite_decay) * q_rms)
+            stein = (G - S_auto - Q_hat).pow(2).mean()     # ‖G − A G Aᵀ − Q̂‖² (per-entry)
+            loss = loss + self.lyap_w * stein
+            op_metrics["op/lyap_stein"] = float(stein.detach())
+
+        # det(op_p) > 0 (model.dual_latent.detpos_weight>0): require the POLICY operator
+        # to be invertible AND orientation-preserving — det A_p ≥ floor > 0. Keeps op_p
+        # in GL⁺ (the identity component): no policy mode collapses to a singular
+        # direction, no orientation flip, so the entropy exponent log det A_p stays
+        # finite and the imagined policy rollout is a proper invertible flow. The
+        # conservative-op_p counterpart to svband's dissipative-op_d (op_d contracts,
+        # det<1, forgets; op_p stays non-singular, det>0, preserves control directions).
+        # det is real even for the rotational op_p — complex eigenvalues pair up. Twin only.
+        if self.detpos_w > 0.0 and dl.mode == "twin":
+            A_p, _ = dl.op_p.operators(p)                  # (N,k,k) policy operator
+            det_p = torch.linalg.det(A_p)                  # (N,) real
+            detpos = torch.relu(self.detpos_floor - det_p).pow(2).mean()  # barrier det ≥ floor>0
+            loss = loss + self.detpos_w * detpos
+            op_metrics["op/detpos"] = float(detpos.detach())
+            op_metrics["op/det_p_mean"] = float(det_p.detach().mean())
+            op_metrics["op/det_p_negfrac"] = float((det_p.detach() <= 0).float().mean())
 
         # twin: ground op_p (p-consistency) + weak coupling of the two geometries
         dual_metrics = {}
@@ -1468,31 +1641,17 @@ class Trainer:
             loss = loss + bal_term
             frame_metrics |= bal_m
 
-        self.model_opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 100.0)
-        _stepped = True
-        if self.skip_nonfinite:   # cf4: a NaN model loss must not poison the weights
-            _mnorm = torch.nn.utils.clip_grad_norm_(
-                (pp for g in self.model_opt.param_groups for pp in g["params"]),
-                float("inf"))     # measure-only (inf ⇒ no extra clip beyond the encoder)
-            _stepped = bool(torch.isfinite(_mnorm))
-            if not _stepped:
-                self._nonfinite_skips += 1
-        if _stepped:
-            self.model_opt.step()
-            self.ema.update(self.encoder)
-        self.step += 1
-        if _math.isfinite(pen_val):
-            self.pen_ema = (pen_val if self.pen_ema is None
-                            else self.ah_decay * self.pen_ema + (1 - self.ah_decay) * pen_val)
-            self.pen_peak = max(self.pen_peak, self.pen_ema)
+        self._model_step(loss, pen_val)   # zero_grad/backward/clip/[skip_nonfinite]/step/ema/step++/pen_ema
 
+        z_std_now = z.detach().std(0).mean().item()
+        if self.excite_enabled and _math.isfinite(z_std_now):   # EMA anchor for the excitation gate
+            self.z_std_ema = (z_std_now if self.z_std_ema is None
+                              else self.excite_decay * self.z_std_ema + (1 - self.excite_decay) * z_std_now)
         out = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss.item(),
                "penalty/value": pen_val, "penalty/lambda": lam_t,
                "penalty/return_gate": self.rg_gate_now, "optim/model_lr": self._model_lr_now,
                "loss/total": loss.item(), "step": self.step,
-               "latent/z_std": z.detach().std(0).mean().item(),
+               "latent/z_std": z_std_now,
                **op_metrics, **dual_metrics, **frame_metrics,
                **self._representation_readouts(z)}
         if vae_metrics is not None:
@@ -1510,6 +1669,15 @@ class Trainer:
         dl = self.dual
         z = z0
         p = dl.p_of(z0)
+        # discrete excitation gate: ONE Bernoulli(excite_p) draw per update, OPEN only at the
+        # operating point (ema z_std within band of the anchor); when open, inject Q-scaled process
+        # noise at every rollout step (parametric drive of the |λ|≈1 oscillator). self.gen = checkpointed RNG.
+        excite_now = False
+        if (self.excite_enabled and self.innov_ema is not None and self.z_std_ema is not None
+                and abs(self.z_std_ema - self.excite_zstd_anchor) <= self.excite_zstd_band):
+            excite_now = bool(torch.bernoulli(
+                torch.full((), self.excite_p, device=self.device), generator=self.gen).item())
+        noise_std = self.excite_scale * self.innov_ema if excite_now else 0.0
         ps, rs, logps = [p], [], []
         for _ in range(H):
             a, logp = self.policy.sample(p, tau0)
@@ -1518,6 +1686,8 @@ class Trainer:
                 p = dl.p_of(z)
             else:
                 p = dl.op_p(p, a)
+            if excite_now:                            # additive detached noise ⇒ gradients still flow through p
+                p = p + noise_std * torch.randn(p.shape, generator=self.gen, device=self.device)
             ps.append(p)
             r_im, _ = self._imagined_reward(ps[-2], a, tau0)
             rs.append(r_im)
@@ -1610,7 +1780,8 @@ class Trainer:
                 "imagine/horizon": H, "imagine/return_mean": returns.mean().item(),
                 "imagine/return_var": returns.var().item(),
                 "imagine/align": align_val, "actor/grad_norm": float(gnorm),
-                "stab/nonfinite_skips": self._nonfinite_skips}
+                "stab/nonfinite_skips": self._nonfinite_skips,
+                "excite/gate": float(excite_now), "excite/noise_std": float(noise_std)}
 
     def _policy_inertia_term(self):
         """Soft trust-region anchor inertia*‖θ_π − θ_π^ema‖² (0.0 when off). Pulls
@@ -1718,17 +1889,6 @@ class Trainer:
             return actor.mean_action(zin, tau)
         return actor.sample(zin, tau)[0]
 
-    @torch.no_grad()
-    def imagine(self, z0: torch.Tensor, horizon: int, tau0: torch.Tensor | None = None):
-        zs, as_, rs = [z0], [], []
-        z = z0
-        for _ in range(horizon):
-            a = self.act(z, tau0)
-            z = self.dynamics(z, a)
-            zs.append(z); as_.append(a)
-            rs.append(self._imagined_reward(zs[-2], a, tau0)[0])
-        return torch.stack(zs), torch.stack(as_), torch.stack(rs)
-
     # ---------------- checkpoint protocol ----------------
     def state_dict(self):
         sd = {"encoder": self.encoder.state_dict(), "ema": self.ema.state_dict(),
@@ -1769,6 +1929,8 @@ class Trainer:
                 # return-gate state (bitwise resume)
                 "ret_ema": self.ret_ema, "rg_gate_now": self.rg_gate_now,
                 "rg_ratchet_on": self._rg_ratchet_on, "rg_ratchet_min": self._rg_ratchet_min,
+                # gated-excitation EMA state (bitwise resume)
+                "z_std_ema": self.z_std_ema, "innov_ema": self.innov_ema,
                 "hutchinson_gen": self.gen.get_state()}
         if self.spec_enabled:
             # spectral reward: per-head (W, b, c) + the rolling cache + refit
@@ -1846,6 +2008,8 @@ class Trainer:
         self.pen_peak = sd.get("pen_peak", 0.0)
         self._ah_ratchet_floor = sd.get("ah_ratchet_floor", 0)
         self._ah_ratchet_on = sd.get("ah_ratchet_on", False)
+        self.z_std_ema = sd.get("z_std_ema", None)
+        self.innov_ema = sd.get("innov_ema", None)
         if "hutchinson_gen" in sd:  # probe RNG must resume too (bitwise resume)
             self.gen.set_state(sd["hutchinson_gen"])
         if self.spec_enabled and "spectral" in sd:

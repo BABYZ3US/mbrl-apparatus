@@ -16,38 +16,16 @@ Status per verb:
   * ``godot``   — served on the GODOT side (the ``env.*`` train seam, ``infer.*``
                   in-engine ONNX); the Python server returns a ``not_served`` stub.
   * ``planned`` — in the v0.1 plan but NOT implemented on either side yet.
+
+SHIM. The verb table is no longer hand-written here — it is derived from the
+spine-generated artifact, vendored into the package as ``_spine_protocol`` (re-sync via
+``spine/scripts/sync-mbrl.sh``). This module keeps the IDENTICAL public surface
+(``VERSION``, ``VERBS``, ``verbs_by_status``, ``SERVED``, ``GODOT``, ``PLANNED``) so the
+bridge server and the conformance test are unaffected. Pure stdlib — safe inside the seal.
 """
 from __future__ import annotations
 
-VERSION = 1
-
-# verb name -> {status, dir, desc}
-VERBS: dict[str, dict] = {
-    "hello":             {"status": "served",  "dir": "->",  "desc": "handshake; reply {version}"},
-    "pull.runs":         {"status": "served",  "dir": "<->", "desc": "run list: name, group, last_step, n_points, keys"},
-    "pull.metric":       {"status": "served",  "dir": "<->", "desc": "full curve {steps, values} (sqlite-preferred)"},
-    "pull.metric_since": {"status": "served",  "dir": "<->", "desc": "incremental curve, env_steps > since"},
-    "pull.datasets":     {"status": "served",  "dir": "<->", "desc": "checkpoint / dataset catalog"},
-    "pull.surface":      {"status": "served",  "dir": "<->", "desc": "reward-surface slice {z, curv, budget, path, ...}"},
-    "submit.spec":       {"status": "served",  "dir": "->",  "desc": "author + launch one run"},
-    "submit.sweep":      {"status": "served",  "dir": "->",  "desc": "expand axes x seeds -> launch each arm"},
-    "pull.run_status":   {"status": "served",  "dir": "<->", "desc": "one run's launch state (running/finished/failed)"},
-    "pull.launched":     {"status": "served",  "dir": "<->", "desc": "all launched runs + their states"},
-    "pull.log":          {"status": "served",  "dir": "<->", "desc": "incremental run-log lines (live-tail)"},
-    "run.cancel":        {"status": "served",  "dir": "->",  "desc": "terminate a running launched child"},
-    "search.submit":     {"status": "served",  "dir": "<->", "desc": "W9 random search: sample arms (typed distributions), persist state, launch the first batch"},
-    "search.status":     {"status": "served",  "dir": "<->", "desc": "a search's arm table (+ last metric per arm) or the catalog (no name)"},
-    "search.tick":       {"status": "served",  "dir": "<->", "desc": "advance a search: sync states, median-rule stop losers (run.cancel), launch queued"},
-    "env.reset":         {"status": "godot",   "dir": "->",  "desc": "train seam — served by Godot serve_env"},
-    "env.step":          {"status": "godot",   "dir": "->",  "desc": "train seam — served by Godot serve_env"},
-    "env.spec":          {"status": "godot",   "dir": "->",  "desc": "train seam — served by Godot serve_env"},
-    "infer.load":        {"status": "godot",   "dir": "->",  "desc": "in-engine ONNX — not served by the runner"},
-    "infer.run":         {"status": "godot",   "dir": "->",  "desc": "in-engine ONNX — not served by the runner"},
-    "pull.artifacts":    {"status": "served",  "dir": "<->", "desc": "a run's artifact manifest (checkpoints + W&B artifacts) + its resolved config"},
-    "pull.sweep":        {"status": "served",  "dir": "<->", "desc": "sweep cells grid: catalog (no name) or flattened arm-rows from results/<name>_cells.jsonl"},
-    "pull.diagnostics":  {"status": "served",  "dir": "<->", "desc": "PCA/cross-validation reports: catalog (no name) or the named results/diagnostics/<name>.json payload"},
-    "error":             {"status": "served",  "dir": "<-",  "desc": "error envelope {code, message}"},
-}
+from ._spine_protocol import VERSION, VERBS  # single source of truth (spine-generated)
 
 
 def verbs_by_status(status: str) -> set[str]:

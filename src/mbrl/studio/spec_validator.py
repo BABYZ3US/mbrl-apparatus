@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ._spine_validate import validate as _generated_validate
+
 # Schedule kinds that touch (or cross) zero — forbidden on the spectral path.
 # Mirror of compile.gd:52.
 ZERO_TOUCHING_KINDS = ("step", "sincos", "sin2chirp")
@@ -77,66 +79,29 @@ class ValidationResult:
 def validate_spec(spec: dict) -> list[str]:
     """Return the spectral house-rule warnings for one ModelSpec ([] if clean).
 
-    Rule parity with compile.gd::validate: identical trigger conditions and
-    defaults. Only the float rendering inside the messages differs (Python repr
-    vs GDScript str) — *which* specs warn is identical, and that behavior is what
-    the shared contract pins.
+    Delegates to the vendored SSOT validator (``_spine_validate.validate``,
+    re-synced from ``spine/generated/python/validate.py``) so the spectral house
+    rules have ONE source — the Haskell spine — instead of a hand-maintained
+    Python copy. The generated validator is parity-proven against this module's
+    former hand-written logic (11 cases); rule parity with compile.gd::validate is
+    therefore preserved transitively through the spine.
+
+    The torch-backed encoder_net chain-rank check is NOT part of the stdlib SSOT
+    validator, so it is layered on here for a custom encoder with a wired net
+    (ImportError-guarded -> skipped inside the seal where torch is absent, exactly
+    as before).
     """
-    warns: list[str] = []
-    # authorable-but-unwired algo selectors (battle-tested components, integration
-    # pending per arm): warn so an authored spec is honest about what trains today.
-    algo = _as_dict(spec.get("algo"))
-    if str(algo.get("critic", "value")) != "value":
-        warns.append("algo.critic '%s' is implemented + tested but not yet consumed "
-                     "by the Trainer — the run trains with the default value head"
-                     % algo.get("critic"))
-    if str(algo.get("actor", "gaussian")) != "gaussian":
-        warns.append("algo.actor '%s' is implemented + tested but not yet consumed "
-                     "by the Trainer — the run trains with the default Gaussian policy"
-                     % algo.get("actor"))
-    if str(algo.get("planner", "none")) != "none":
-        warns.append("algo.planner '%s' is implemented + tested but not yet consumed "
-                     "by the Trainer — actions come from the policy, not MPC"
-                     % algo.get("planner"))
+    warns = list(_generated_validate(spec))
     model = _as_dict(spec.get("model"))
     if str(model.get("encoder", "")) == "custom":
-        net = [dict(l) for l in (model.get("encoder_net", []) or [])]
-        if not net:
-            warns.append("model.encoder=custom but encoder_net is empty — wire an "
-                         "NN-layer chain into the encoder's net pin")
-        else:
-            # check_net_ranks lives in mbrl.models.net_builder, which transitively
-            # imports torch — NOT available inside the sealed boundary (this module
-            # is documented torch-free). Degrade gracefully: skip the rank warnings
-            # when torch is absent (the Studio already rank-checks at author time via
-            # compile.gd) rather than crashing the bridge server's client thread.
+        net = [dict(layer) for layer in (model.get("encoder_net", []) or [])]
+        if net:
             try:
                 from ..models.net_builder import check_net_ranks
             except ImportError:
                 pass
             else:
                 warns.extend("encoder_net: " + e for e in check_net_ranks(net, 1))
-    spectral = _as_dict(spec.get("spectral"))
-    if not bool(spectral.get("enabled", False)):
-        return warns  # non-spectral path: house rules don't apply
-
-    sched = _as_dict(_as_dict(spec.get("penalty")).get("schedule"))
-    kind = sched.get("kind", "")
-    floor = _to_float(sched.get("floor", 0.0))  # missing -> 0.0 -> warns
-    if kind in ZERO_TOUCHING_KINDS or floor <= 0.0:
-        warns.append(
-            f"spectral path: schedule '{kind}' (floor {floor}) is zero-touching"
-            " — use cuberoot with floor > 0 (ledger 2026-06-07)"
-        )
-
-    # GDScript: int(spec.model.get("latent_cap_mult", 4)). Missing key -> 4 -> warns;
-    # present-but-unparseable -> int() -> 0 -> no warn.
-    cap = _to_int(_as_dict(spec.get("model")).get("latent_cap_mult", 4), default=0)
-    if cap > 1:
-        warns.append(
-            f"spectral path: latent_cap_mult {cap} > 1 over-resolves the"
-            " closed-form fit — set 1 (ledger 2026-06-07)"
-        )
     return warns
 
 
