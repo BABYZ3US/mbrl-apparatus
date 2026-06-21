@@ -143,6 +143,24 @@ def _is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _wandb_env(wandb_key, wandb_mode) -> dict | None:
+    """W&B env overrides for a launched run, or None to inherit the server's env
+    unchanged (byte-exact default — e.g. the pod's already-exported WANDB_API_KEY).
+
+    Carried ALONGSIDE the model_spec in the submit data (a sibling, never inside the
+    spec) so it never reaches the experiment yaml; used for the child ENV ONLY. A key
+    implies online unless a mode is given. SECURITY: callers must keep the key out of
+    argv, the yaml, logs, and replies — it lives only in this dict.
+    """
+    env: dict = {}
+    if wandb_key:
+        env["WANDB_API_KEY"] = str(wandb_key)
+        env["WANDB_MODE"] = "online"
+    if wandb_mode:
+        env["WANDB_MODE"] = str(wandb_mode)
+    return env or None
+
+
 class FrameDecoder:
     """Accumulates raw bytes and yields whole length-prefixed frames.
 
@@ -397,8 +415,13 @@ class StudioBridgeServer:
             _log("submit_spec.dryrun", run_name=run_name, command=argv)
             return reply
 
+        # W&B secret passthrough: optional wandb_key/wandb_mode carried ALONGSIDE the
+        # model_spec (NOT inside it — so never written to the experiment yaml) are injected
+        # into the train.py spawn ENV only; never logged, never in argv/replies. Absent =>
+        # inherit the server's env (e.g. the pod's exported key).
+        spawn_env = _wandb_env(data.get("wandb_key"), data.get("wandb_mode"))
         try:
-            info = self.launcher.launch(run_name, argv, self.repo_root)
+            info = self.launcher.launch(run_name, argv, self.repo_root, env=spawn_env)
         except Exception as exc:  # noqa: BLE001
             _log("submit_spec.launch_failed", error=repr(exc), command=argv)
             return {"accepted": False, "run_name": run_name,

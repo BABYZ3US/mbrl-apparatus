@@ -15,6 +15,7 @@ be injected without touching the server (ARCH_RECOMMENDATIONS A3, the cloud-laun
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -52,12 +53,23 @@ class LaunchRegistry:
                 pass
         rec["_fh"] = None
 
-    def launch(self, run_name: str, argv: list, cwd) -> dict:
-        """Spawn argv in `cwd`, streaming stdout+stderr to <log_dir>/<run_name>.log."""
+    def launch(self, run_name: str, argv: list, cwd, env: dict | None = None) -> dict:
+        """Spawn argv in `cwd`, streaming stdout+stderr to <log_dir>/<run_name>.log.
+
+        `env`, when given, is MERGED over the inherited process environment for the
+        CHILD only (e.g. {"WANDB_API_KEY": ..., "WANDB_MODE": "online"} the Studio
+        passed in) — secrets reach the run via the env, never the argv/yaml/logs.
+        None (the default) inherits the server's env unchanged (byte-exact).
+        """
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.log_dir / f"{run_name}.log"
         fh = open(log_path, "w", buffering=1)  # line-buffered so tail sees live output
-        popen = subprocess.Popen(argv, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT)
+        child_env = None
+        if env:
+            child_env = os.environ.copy()
+            child_env.update({str(k): str(v) for k, v in env.items()})
+        popen = subprocess.Popen(argv, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT,
+                                 env=child_env)
         rec = {"popen": popen, "_fh": fh, "pid": popen.pid,
                "started_at": time.time(), "log_path": str(log_path), "argv": list(argv)}
         with self._lock:
