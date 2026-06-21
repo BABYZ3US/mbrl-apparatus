@@ -29,10 +29,12 @@ VERBS = {
     "pull.sweep": {"status": "served", "dir": "<->", "desc": "sweep cells grid: catalog (no name) or flattened arm-rows from results/<name>_cells.jsonl"},
     "pull.diagnostics": {"status": "served", "dir": "<->", "desc": "PCA/cross-validation reports: catalog (no name) or the named results/diagnostics/<name>.json payload"},
     "pull.operator_spectrum": {"status": "served", "dir": "<->", "desc": "operator singular-value spectrum over training: {steps, modes[][], mode_keys} assembled from the op/sv* curves"},
+    "pull.tensor": {"status": "served", "dir": "<->", "desc": "named tensor snapshot: catalog (no name) or {run,name,step,matrix[][]/vector[],eig?} for a named tensor (gram, op_d, op_p, ...) under results/<run>/tensors/"},
+    "pull.salience": {"status": "served", "dir": "<->", "desc": "input/feature salience map: |d reward / d obs| over a batch, {run,step,salience[],dims} (latest or by step)"},
     "error": {"status": "served", "dir": "<-", "desc": "error envelope {code, message}"},
 }
 
-SERVED = {"hello", "pull.runs", "pull.metric", "pull.metric_since", "pull.datasets", "pull.surface", "submit.spec", "submit.sweep", "pull.run_status", "pull.launched", "pull.log", "run.cancel", "search.submit", "search.status", "search.tick", "pull.artifacts", "pull.sweep", "pull.diagnostics", "pull.operator_spectrum", "error"}
+SERVED = {"hello", "pull.runs", "pull.metric", "pull.metric_since", "pull.datasets", "pull.surface", "submit.spec", "submit.sweep", "pull.run_status", "pull.launched", "pull.log", "run.cancel", "search.submit", "search.status", "search.tick", "pull.artifacts", "pull.sweep", "pull.diagnostics", "pull.operator_spectrum", "pull.tensor", "pull.salience", "error"}
 GODOT = {"env.reset", "env.step", "env.spec", "infer.load", "infer.run"}
 
 METRIC_KEYS = ["eval/return", "loss/total", "loss/dyn", "loss/reward", "loss/value", "loss/policy", "penalty/value", "penalty/lambda", "policy/entropy", "policy/ret_scale", "imagine/return_mean", "imagine/return_var", "imagine/horizon", "model/reward_disagreement", "dyn/disagreement", "dyn/calib_corr", "vae/recon", "vae/kl"]

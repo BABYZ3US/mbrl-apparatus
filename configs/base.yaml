@@ -502,6 +502,17 @@ logging:
     enabled: true
     every_evals: 4      # record one extra rgb_array episode every Nth eval
 
+viz:                    # Studio viz snapshots — all GATED, default 0 = OFF (byte-exact).
+                        # surface_every is added on the CLI via +viz.surface_every=N
+                        # (scripts/train.py); the two below are real keys (override as
+                        # viz.tensor_every=N / viz.salience_every=N, no '+').
+  tensor_every: 0       # default 0 = off; every Nth MODEL UPDATE snapshot the latent
+                        # Gram (cov-gram) to tensors/gram_<step>.json (served via
+                        # pull.tensor). Gated exactly like surface_every.
+  salience_every: 0     # default 0 = off; every Nth model update snapshot reward input
+                        # salience |∂reward/∂obs| to tensors/reward_input_salience_<step>.json
+                        # (served via pull.salience). Gated exactly like surface_every.
+
 # ---- authorable algorithm components (battle-tested; Studio graph selectors) ----
 # Implemented + unit-tested in src/mbrl (critics.py, ensemble.py, planning/cem.py).
 # Selectors other than the defaults are NOT yet consumed by the Trainer — the

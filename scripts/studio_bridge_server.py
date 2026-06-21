@@ -51,6 +51,7 @@ from mbrl.studio import spec_to_overrides, write_experiment_yaml, run_name_for_s
 # the seal (no torch). Back pull.datasets / pull.surface / submit.sweep + the gate.
 from mbrl.studio.run_index import RunIndex  # noqa: E402
 from mbrl.studio.surface_index import SurfaceIndex  # noqa: E402
+from mbrl.studio.tensor_index import TensorIndex  # noqa: E402
 from mbrl.studio.cells_index import CellsIndex  # noqa: E402
 from mbrl.studio.diagnostics_index import DiagnosticsIndex  # noqa: E402
 from mbrl.studio.sweep import plan_sweep  # noqa: E402
@@ -78,6 +79,8 @@ SUBMIT_SPEC = "submit.spec"
 PULL_DATASETS = "pull.datasets"   # v0.1
 PULL_ARTIFACTS = "pull.artifacts"  # F1: per-run artifact manifest
 PULL_SURFACE = "pull.surface"     # v0.1
+PULL_TENSOR = "pull.tensor"       # generic named-tensor reader: catalog (no name) | named tensor
+PULL_SALIENCE = "pull.salience"   # reward input/feature salience (the named "reward_input_salience" tensor)
 PULL_OPERATOR_SPECTRUM = "pull.operator_spectrum"  # op/sv* -> {steps, modes[][], mode_keys}
 SUBMIT_SWEEP = "submit.sweep"     # v0.1
 PULL_SWEEP = "pull.sweep"         # sweep cells: catalog or flattened arm-rows
@@ -624,6 +627,33 @@ class StudioBridgeServer:
             surf = SurfaceIndex(self.results_dir.parent).get_surface(
                 str(data.get("run", "")), step_n)
             return make(PULL_SURFACE, surf, id_)
+        if type_ == PULL_TENSOR:
+            # generic named-tensor reader (same run-path convention as pull.surface):
+            # no name -> the run's tensor catalog; a name -> that named tensor (latest
+            # step, or the given step; step=-1 normalized to None like pull.surface).
+            tidx = TensorIndex(self.results_dir.parent)
+            run = str(data.get("run", ""))
+            name = str(data.get("name", "") or "")
+            if not name:
+                return make(PULL_TENSOR, tidx.list_tensors(run), id_)
+            step_v = data.get("step")
+            try:
+                step_n = None if step_v is None or int(step_v) < 0 else int(step_v)
+            except (TypeError, ValueError):
+                step_n = None
+            return make(PULL_TENSOR, tidx.get_tensor(run, name, step_n), id_)
+        if type_ == PULL_SALIENCE:
+            # reward input/feature salience = the named "reward_input_salience" tensor
+            # (|∂reward/∂obs| over a batch). Same step normalization as pull.surface.
+            tidx = TensorIndex(self.results_dir.parent)
+            run = str(data.get("run", ""))
+            step_v = data.get("step")
+            try:
+                step_n = None if step_v is None or int(step_v) < 0 else int(step_v)
+            except (TypeError, ValueError):
+                step_n = None
+            return make(PULL_SALIENCE,
+                        tidx.get_tensor(run, "reward_input_salience", step_n), id_)
         if type_ == PULL_OPERATOR_SPECTRUM:
             return make(PULL_OPERATOR_SPECTRUM,
                         read_operator_spectrum(self.results_dir, str(data.get("run", ""))), id_)

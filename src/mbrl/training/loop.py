@@ -11,6 +11,9 @@ through, R15). Optional task conditioning (task_dim > 0) for multi-task runs.
 from __future__ import annotations
 
 import copy
+import json
+import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -379,6 +382,26 @@ class Trainer:
         self.lambda_min = float(cfg.penalty.get("lambda_min", 0.0) or 0.0)
         self.step = 0
         self.gen = make_generator(self.device, cfg.seed)
+        # ---- Studio viz tensor/salience snapshots (DEFAULT-OFF, byte-exact) ----
+        # Two named-tensor surfaces for the Studio, gated EXACTLY like the reward-
+        # surface snapshot (viz.surface_every in scripts/train.py): write nothing on
+        # default runs. viz.tensor_every>0  => every Nth model update, snapshot the
+        # latent Gram G (and, in twin mode, op_d/op_p) to tensors/gram_<step>.json.
+        # viz.salience_every>0 => snapshot |∂reward/∂obs| to
+        # tensors/reward_input_salience_<step>.json from a SELF-CONTAINED autograd
+        # pass (its own detached obs leaf; no training tensors/opt/RNG touched, NO
+        # self.gen draws). Both keyed on self.step (the model-update index). 0 = OFF.
+        _viz = dict(cfg.get("viz", {}) or {})
+        self.tensor_every = int(_viz.get("tensor_every", 0) or 0)
+        self.salience_every = int(_viz.get("salience_every", 0) or 0)
+        self._viz_tensors_on = self.tensor_every > 0 or self.salience_every > 0
+        # run name + results ROOT for the artifact path — built the SAME way the
+        # surface snapshot does (scripts/train.py): <logging.dir>/runs/<run>/tensors/,
+        # matching the SurfaceIndex/TensorIndex run-path convention. Only consulted
+        # when a cadence is on (default runs never touch the filesystem here).
+        if self._viz_tensors_on:
+            self._viz_run = f"{cfg.experiment.name}-{cfg.env.name}-s{cfg.seed}"
+            self._viz_root = str(cfg.logging.dir)
         # Gated stochastic excitation (model.operator.excite_*): a discrete Bernoulli(excite_p)
         # gate per behaviour update, OPEN only when the latent sits at its attractor (ema z_std
         # within excite_zstd_band of excite_zstd_anchor). When open, inject process noise
@@ -763,7 +786,95 @@ class Trainer:
         ev_desc = ev.flip(0)
         for i in range(ev_desc.shape[0]):
             out["latent/eig%02d" % i] = float(ev_desc[i])
+        # GATED viz snapshot (default-OFF): persist the SAME Gram G + its descending
+        # spectrum (already computed above, ~free) to tensors/gram_<step>.json for
+        # the Studio cov-gram surface. In twin mode also snapshot op_d/op_p if the
+        # operator matrices are cheaply on hand. Wrapped so viz can never kill a
+        # run; self.step is already advanced (_model_step runs before this readout).
+        if self.tensor_every > 0 and (self.step % self.tensor_every == 0):
+            self._snapshot_gram(z, G, ev_desc)
         return out
+
+    # ---------------- gated Studio named-tensor snapshots (default-OFF) ----------
+    def _write_tensor_json(self, name: str, payload: dict) -> None:
+        """Write-then-rename a named tensor to <root>/runs/<run>/tensors/<name>_<step>.json.
+
+        Mirrors mbrl.viz.surface_export.write_surface_json's destination convention
+        (one level over: tensors/ beside surfaces/), with an atomic tmp+rename so a
+        torn write can never be half-read by the stdlib TensorIndex. Creates the
+        tensors/ dir. Never raises into training — any viz IO error only warns."""
+        try:
+            out_dir = Path(self._viz_root) / "runs" / self._viz_run / "tensors"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            final = out_dir / f"{name}_{int(self.step)}.json"
+            tmp = out_dir / f".{name}_{int(self.step)}.json.tmp"
+            tmp.write_text(json.dumps(payload))
+            os.replace(tmp, final)   # atomic on POSIX: readers see whole-or-nothing
+        except Exception as _e:  # noqa: BLE001 — viz must never kill a training run
+            print(f"[warn] tensor snapshot {name!r} failed ({_e!r}); training continues")
+
+    @torch.no_grad()
+    def _snapshot_gram(self, z: torch.Tensor, G: torch.Tensor,
+                       ev_desc: torch.Tensor) -> None:
+        """Snapshot the latent Gram G = E[zzᵀ] (the cov-gram surface) — the EXACT G
+        and descending eigenvalues from _representation_readouts. In twin mode also
+        snapshot the (batch-mean) policy/dynamics operator matrices op_d/op_p, which
+        are cheaply available from the operators. no_grad/detached; default-OFF."""
+        self._write_tensor_json("gram", {
+            "run": self._viz_run, "name": "gram", "step": int(self.step),
+            "matrix": G.detach().cpu().tolist(),
+            "eig": ev_desc.detach().cpu().tolist(),   # descending eigenvalues
+        })
+        # twin operators: A_d(d), A_p(p) are per-sample matrix FIELDS (B,k,k); the
+        # batch mean is one representative (k,k) operator per branch — cheap, no_grad.
+        if self.dual_latent and self.dual is not None and self.dual.mode == "twin":
+            try:
+                d = self.dual.d_of(z)
+                p = self.dual.p_of(z)
+                Ad, _ = self.dual.op_d.operators(d)
+                Ap, _ = self.dual.op_p.operators(p)
+                self._write_tensor_json("op_d", {
+                    "run": self._viz_run, "name": "op_d", "step": int(self.step),
+                    "matrix": Ad.mean(0).detach().cpu().tolist()})
+                self._write_tensor_json("op_p", {
+                    "run": self._viz_run, "name": "op_p", "step": int(self.step),
+                    "matrix": Ap.mean(0).detach().cpu().tolist()})
+            except Exception as _e:  # noqa: BLE001 — optional; never block the gram snapshot
+                print(f"[warn] twin-operator snapshot failed ({_e!r}); training continues")
+
+    def _snapshot_input_salience(self, obs: torch.Tensor, a: torch.Tensor,
+                                 tau: torch.Tensor | None) -> None:
+        """INPUT/FEATURE salience |∂reward/∂obs| over the batch (default-OFF).
+
+        A SELF-CONTAINED autograd pass that touches NO training tensor, optimizer or
+        RNG (no self.gen draws): clone+detach the obs into a fresh leaf, forward
+        obs→encoder→z→reward head (reading the policy latent p in dual mode, the same
+        wiring training uses), backward the scalar mean predicted reward, and read
+        sal = obs.grad.abs().mean(0). Snapshots to reward_input_salience_<step>.json.
+        Differentiating all the way to obs through the encoder works directly here, so
+        this is true ∂/∂obs (no fallback to ∂/∂z needed)."""
+        try:
+            obs_l = obs.detach().clone().requires_grad_(True)   # fresh leaf, own graph
+            a_d = a.detach()
+            tau_d = tau.detach() if tau is not None else None
+            with torch.enable_grad():
+                # RNG-FREE encode: the VAE encoder's forward() samples (global-RNG
+                # randn) when training — use its deterministic MEAN here so this pass
+                # consumes NO RNG and stays byte-exact. Deterministic encoders are
+                # already sample-free, so forward() is fine for them.
+                z = (self.encoder.moments(obs_l)[0] if self.enc_vae
+                     else self.encoder(obs_l))
+                rz = self.dual.p_of(z) if self.dual_latent else z   # reward reads p in dual mode
+                r_pred = self.reward(rz, a_d, tau_d)                 # head mean (symlog space)
+                scalar = r_pred.mean()
+                grad = torch.autograd.grad(scalar, obs_l)[0]         # ∂reward/∂obs
+            sal = grad.detach().abs().mean(dim=0)                    # (obs_dim,)
+            self._write_tensor_json("reward_input_salience", {
+                "run": self._viz_run, "name": "reward_input_salience",
+                "step": int(self.step), "salience": sal.cpu().tolist(),
+                "dims": int(obs_l.shape[-1]), "wrt": "obs"})
+        except Exception as _e:  # noqa: BLE001 — viz must never kill a training run
+            print(f"[warn] salience snapshot failed ({_e!r}); training continues")
 
     # ---------------- rank-2 reward⊥energy frame (cf5) ----------------
     def _rank2_frame(self, z, d, p, a, tau):
@@ -1204,6 +1315,13 @@ class Trainer:
 
         import math as _math   # used by the channel-capacity diagnostics below
         self._model_step(loss, pen_val)   # zero_grad/backward/clip/step/ema/step++/pen_ema
+
+        # GATED input-salience snapshot (default-OFF, self.step already advanced): a
+        # self-contained ∂reward/∂obs pass on a detached obs leaf — no training
+        # tensor/opt/RNG touched (NO self.gen draws). The Gram snapshot rides
+        # _representation_readouts(z) below.
+        if self.salience_every > 0 and (self.step % self.salience_every == 0):
+            self._snapshot_input_salience(obs, a, tau)
 
         # ---- latent-as-channel diagnostics (rate-distortion / IB frontier) ----
         # rate  = E KL(q_φ(z|x) ‖ N(0,I)) >= I(x;z)  (only defined for the VAE
@@ -1719,6 +1837,12 @@ class Trainer:
             frame_metrics |= bal_m
 
         self._model_step(loss, pen_val)   # zero_grad/backward/clip/[skip_nonfinite]/step/ema/step++/pen_ema
+
+        # GATED input-salience snapshot (default-OFF, dual path): same self-contained
+        # ∂reward/∂obs pass (reward reads p in dual mode; the helper handles that). No
+        # training tensor/opt/RNG touched. The Gram snapshot rides _representation_readouts below.
+        if self.salience_every > 0 and (self.step % self.salience_every == 0):
+            self._snapshot_input_salience(obs, a, tau)
 
         z_std_now = z.detach().std(0).mean().item()
         if self.excite_enabled and _math.isfinite(z_std_now):   # EMA anchor for the excitation gate
