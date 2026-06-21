@@ -1328,15 +1328,51 @@ class Trainer:
             clip = self.actor_clip * (self.ra_clip_min + (1.0 - self.ra_clip_min) * (1.0 - rf))
         return ent_coef, floor_pen, clip
 
-    # ---------------- behaviour learning (Dreamer lambda-returns) ----------------
-    def behaviour_update(self, z0: torch.Tensor, tau0: torch.Tensor | None = None) -> dict:
-        if self.dual_latent:
-            return self._behaviour_update_dual(z0, tau0)
-        cfg_i = self.cfg.imagination
-        gamma, lam_ret = cfg_i.gamma, cfg_i.get("lambda_", 0.95)
-        H = self._imagination_horizon()
-        ent_coef = cfg_i.get("entropy_coef", 3e-4)
+    def _returns_and_scale(self, zs, rs, tau0, H, cfg_i, gamma, lam_ret):
+        """Value-target bootstrap + advantage/lambda-returns + Dreamer-V3 return
+        scaling. Pure extraction of the contiguous block from behaviour_update
+        (primary path); preserves every statement and order verbatim. NO self.gen
+        draws. Returns (returns, adv, norm); mutates self.ret_scale in place exactly
+        as before. `zs` are the imagined latents (H+1, B, k)."""
+        with torch.no_grad():
+            flat = zs.reshape(-1, zs.shape[-1])
+            tgt_tau = tau0.repeat(H + 1, 1) if tau0 is not None else None
+            v_tgt = self.value_target(flat, tgt_tau).reshape(H + 1, -1)
+            if self.double_value:   # A4: min(V1,V2) clipped-double-value bootstrap
+                v_tgt = torch.minimum(v_tgt, self.value2_target(flat, tgt_tau).reshape(H + 1, -1))
+        # advantage estimator: "lambda" (default, unchanged) | "gae" (Schulman 2016,
+        # the PPO/A2C standard). Both share gamma/lambda_; GAE's value target
+        # (adv + v) IS the lambda-return (pinned by test_returns_gae), so the value
+        # regression below is identical — only the POLICY weighting changes.
+        advantage = str(cfg_i.get("advantage", "lambda"))
+        if advantage == "gae":
+            adv, returns = gae_advantages(rs, v_tgt, gamma, lam_ret)  # (H, B) x2
+        else:
+            returns = lambda_returns(rs, v_tgt, gamma, lam_ret)       # (H, B)
+            adv = None
+        if self.return_clip > 0.0:   # cf4: hard-bound the λ-returns (and GAE advantage)
+            returns = returns.clamp(-self.return_clip, self.return_clip)  # so a diverged
+            if adv is not None:                                           # imagined rollout
+                adv = adv.clamp(-self.return_clip, self.return_clip)      # can't NaN the loss
 
+        # --- return normalization (Dreamer-V3): scale-invariant policy gradient
+        with torch.no_grad():
+            lo = torch.quantile(returns.detach().float(), 0.05)
+            hi = torch.quantile(returns.detach().float(), 0.95)
+            decay = cfg_i.get("ret_scale_decay", 0.99)
+            span = float(hi - lo)
+            if np.isfinite(span):  # NaN hygiene: don't poison the scale EMA
+                self.ret_scale = decay * self.ret_scale + (1 - decay) * span
+        norm = max(1.0, self.ret_scale)
+        return returns, adv, norm
+
+    def _imagine_rollout(self, z0, tau0, H):
+        """Differentiable imagination on the primary (single-latent) path: roll the
+        learned dynamics under the policy/planner, scoring per-step imagined reward.
+        Pure extraction of the contiguous block from behaviour_update; every statement
+        and order preserved verbatim. Draws ZERO self.gen (the primary rollout uses the
+        policy's own sampler, NOT self.gen — the strict primary RNG invariant). Returns
+        (zs, rs, logps, dis, pen_stats); zs is (H+1, B, k), rs/logps are (H, B)."""
         # --- differentiable imagination (gradients flow through T and R) ---
         # planner: emit the whole H-step plan from z0 up front (open-loop), then
         # roll T under it; the per-step policy samples closed-loop on z_k.
@@ -1372,38 +1408,17 @@ class Trainer:
                          "imagine/penalty_var": pen_t.var().item()}
         rs = smooth_rewards(torch.stack(rs), self.cfg.smoothing)  # (H, B)
         logps = torch.stack(logps)                # (H, B)
+        return zs, rs, logps, dis, pen_stats
 
-        with torch.no_grad():
-            flat = zs.reshape(-1, zs.shape[-1])
-            tgt_tau = tau0.repeat(H + 1, 1) if tau0 is not None else None
-            v_tgt = self.value_target(flat, tgt_tau).reshape(H + 1, -1)
-            if self.double_value:   # A4: min(V1,V2) clipped-double-value bootstrap
-                v_tgt = torch.minimum(v_tgt, self.value2_target(flat, tgt_tau).reshape(H + 1, -1))
-        # advantage estimator: "lambda" (default, unchanged) | "gae" (Schulman 2016,
-        # the PPO/A2C standard). Both share gamma/lambda_; GAE's value target
-        # (adv + v) IS the lambda-return (pinned by test_returns_gae), so the value
-        # regression below is identical — only the POLICY weighting changes.
-        advantage = str(cfg_i.get("advantage", "lambda"))
-        if advantage == "gae":
-            adv, returns = gae_advantages(rs, v_tgt, gamma, lam_ret)  # (H, B) x2
-        else:
-            returns = lambda_returns(rs, v_tgt, gamma, lam_ret)       # (H, B)
-            adv = None
-        if self.return_clip > 0.0:   # cf4: hard-bound the λ-returns (and GAE advantage)
-            returns = returns.clamp(-self.return_clip, self.return_clip)  # so a diverged
-            if adv is not None:                                           # imagined rollout
-                adv = adv.clamp(-self.return_clip, self.return_clip)      # can't NaN the loss
-
-        # --- return normalization (Dreamer-V3): scale-invariant policy gradient
-        with torch.no_grad():
-            lo = torch.quantile(returns.detach().float(), 0.05)
-            hi = torch.quantile(returns.detach().float(), 0.95)
-            decay = cfg_i.get("ret_scale_decay", 0.99)
-            span = float(hi - lo)
-            if np.isfinite(span):  # NaN hygiene: don't poison the scale EMA
-                self.ret_scale = decay * self.ret_scale + (1 - decay) * span
-        norm = max(1.0, self.ret_scale)
-
+    def _policy_value_step(self, zs, returns, adv, norm, logps, ent_coef, z0, tau0, H, cfg_i):
+        """Actor (policy/planner) + value optimizer step on the primary path
+        (incl. the cf4 stabilizers: skip_nonfinite, value_clip, double_value, and
+        the policy EMA). Pure extraction of the contiguous block from
+        behaviour_update — every statement and order preserved verbatim. NO self.gen
+        draws (the optimizer steps / EMA updates are deterministic; _policy_reg may
+        step the alpha opt but draws no self.gen). Returns
+        (entropy, pi_loss, v_loss, align_val, gnorm) for the metrics dict; mutates
+        self._nonfinite_skips and the value/policy nets/targets exactly as before."""
         # --- policy: maximize normalized lambda-returns (or GAE advantages) +
         #     entropy (never curvature-penalized, R10)
         entropy = -logps.mean()
@@ -1471,6 +1486,23 @@ class Trainer:
                 for pt, pp in zip(self.value2_target.parameters(), self.value2.parameters()):
                     pt.lerp_(pp, 1.0 - decay)
         self._update_policy_ema()
+        return entropy, pi_loss, v_loss, align_val, gnorm
+
+    # ---------------- behaviour learning (Dreamer lambda-returns) ----------------
+    def behaviour_update(self, z0: torch.Tensor, tau0: torch.Tensor | None = None) -> dict:
+        if self.dual_latent:
+            return self._behaviour_update_dual(z0, tau0)
+        cfg_i = self.cfg.imagination
+        gamma, lam_ret = cfg_i.gamma, cfg_i.get("lambda_", 0.95)
+        H = self._imagination_horizon()
+        ent_coef = cfg_i.get("entropy_coef", 3e-4)
+
+        zs, rs, logps, dis, pen_stats = self._imagine_rollout(z0, tau0, H)
+
+        returns, adv, norm = self._returns_and_scale(zs, rs, tau0, H, cfg_i, gamma, lam_ret)
+
+        entropy, pi_loss, v_loss, align_val, gnorm = self._policy_value_step(
+            zs, returns, adv, norm, logps, ent_coef, z0, tau0, H, cfg_i)
 
         return {"loss/value": v_loss.item(), "loss/policy": pi_loss.item(),
                 "policy/entropy": entropy.item(),
@@ -1658,14 +1690,18 @@ class Trainer:
             out |= vae_metrics
         return out
 
-    def _behaviour_update_dual(self, z0: torch.Tensor, tau0=None) -> dict:
-        """Imagine in the POLICY latent p (shared: roll backbone z, read p=P(z);
-        twin: roll p with op_p), score reward/value on p, train via Dreamer
-        λ-returns (R10: the actor is never curvature-penalized)."""
-        cfg_i = self.cfg.imagination
-        gamma, lam_ret = cfg_i.gamma, cfg_i.get("lambda_", 0.95)
-        H = self._imagination_horizon()
-        ent_coef = cfg_i.get("entropy_coef", 3e-4)
+    def _imagine_rollout_dual(self, z0, tau0, H):
+        """Differentiable imagination on the DUAL-LATENT path: roll in the policy
+        latent p (shared: roll backbone z, read p=P(z); twin: roll p with op_p),
+        with the gated stochastic excitation Q-drive. Pure extraction of the
+        contiguous block from _behaviour_update_dual — every statement and order
+        preserved verbatim, INCLUDING the self.gen draws and their guards.
+        RNG-CRITICAL: the only self.gen draws on the behaviour side live here —
+        (1) ONE Bernoulli(excite_p) gate draw before the loop, then (2) one randn
+        per rollout step inside the loop when the gate is open. Both stay in their
+        original positions/order relative to each other and to everything else (no
+        other self.gen draw exists in this method). Returns
+        (ps, rs, logps, excite_now, noise_std); ps is (H+1, B, p_dim)."""
         dl = self.dual
         z = z0
         p = dl.p_of(z0)
@@ -1695,31 +1731,16 @@ class Trainer:
         ps = torch.stack(ps)                          # (H+1, B, p_dim)
         rs = smooth_rewards(torch.stack(rs), self.cfg.smoothing)   # (H, B)
         logps = torch.stack(logps)                    # (H, B)
+        return ps, rs, logps, excite_now, noise_std
 
-        with torch.no_grad():
-            flat = ps.reshape(-1, ps.shape[-1])
-            tgt_tau = tau0.repeat(H + 1, 1) if tau0 is not None else None
-            v_tgt = self.value_target(flat, tgt_tau).reshape(H + 1, -1)
-            if self.double_value:   # A4: min(V1,V2) clipped-double-value bootstrap
-                v_tgt = torch.minimum(v_tgt, self.value2_target(flat, tgt_tau).reshape(H + 1, -1))
-        if str(cfg_i.get("advantage", "lambda")) == "gae":
-            adv, returns = gae_advantages(rs, v_tgt, gamma, lam_ret)
-        else:
-            returns, adv = lambda_returns(rs, v_tgt, gamma, lam_ret), None
-        if self.return_clip > 0.0:   # cf4: hard-bound the λ-returns (and GAE advantage)
-            returns = returns.clamp(-self.return_clip, self.return_clip)  # so a diverged
-            if adv is not None:                                           # imagined rollout
-                adv = adv.clamp(-self.return_clip, self.return_clip)      # can't NaN the loss
-
-        with torch.no_grad():
-            lo = torch.quantile(returns.detach().float(), 0.05)
-            hi = torch.quantile(returns.detach().float(), 0.95)
-            span = float(hi - lo)
-            if np.isfinite(span):
-                self.ret_scale = cfg_i.get("ret_scale_decay", 0.99) * self.ret_scale \
-                    + (1 - cfg_i.get("ret_scale_decay", 0.99)) * span
-        norm = max(1.0, self.ret_scale)
-
+    def _policy_value_step_dual(self, ps, returns, adv, norm, logps, ent_coef, tau0, H, cfg_i):
+        """Actor (policy) + value optimizer step on the DUAL-LATENT path (incl. the
+        cf4 stabilizers and the policy EMA). Imagination/alignment are in p-space
+        (ps), and the actor is always self.policy (the planner is never used in dual
+        mode). Pure extraction of the contiguous block from _behaviour_update_dual —
+        every statement and order preserved verbatim. NO self.gen draws. Returns
+        (entropy, pi_loss, v_loss, align_val, gnorm); mutates self._nonfinite_skips
+        and the value/policy nets/targets exactly as before."""
         entropy = -logps.mean()
         pi_signal = adv if adv is not None else returns
         ent_coef_eff, floor_pen, clip_eff = self._policy_reg(entropy, ent_coef)
@@ -1774,6 +1795,23 @@ class Trainer:
                 for pt, pp in zip(self.value2_target.parameters(), self.value2.parameters()):
                     pt.lerp_(pp, 1.0 - decay)
         self._update_policy_ema()
+        return entropy, pi_loss, v_loss, align_val, gnorm
+
+    def _behaviour_update_dual(self, z0: torch.Tensor, tau0=None) -> dict:
+        """Imagine in the POLICY latent p (shared: roll backbone z, read p=P(z);
+        twin: roll p with op_p), score reward/value on p, train via Dreamer
+        λ-returns (R10: the actor is never curvature-penalized)."""
+        cfg_i = self.cfg.imagination
+        gamma, lam_ret = cfg_i.gamma, cfg_i.get("lambda_", 0.95)
+        H = self._imagination_horizon()
+        ent_coef = cfg_i.get("entropy_coef", 3e-4)
+
+        ps, rs, logps, excite_now, noise_std = self._imagine_rollout_dual(z0, tau0, H)
+
+        returns, adv, norm = self._returns_and_scale(ps, rs, tau0, H, cfg_i, gamma, lam_ret)
+
+        entropy, pi_loss, v_loss, align_val, gnorm = self._policy_value_step_dual(
+            ps, returns, adv, norm, logps, ent_coef, tau0, H, cfg_i)
 
         return {"loss/value": v_loss.item(), "loss/policy": pi_loss.item(),
                 "policy/entropy": entropy.item(), "policy/ret_scale": self.ret_scale,
