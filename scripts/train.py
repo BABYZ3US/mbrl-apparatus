@@ -183,7 +183,10 @@ def run_single_task(cfg: DictConfig, device: str):
 
         # ---- model learning (GPU) ----
         for _u in range(cfg.training.model_updates_per_iter):
-            metrics = trainer.model_update(buffer.sample(cfg.optim.batch_size))
+            batch = (buffer.sample_windows(cfg.optim.batch_size, trainer.tf_window)
+                     if trainer.transformer_enabled
+                     else buffer.sample(cfg.optim.batch_size))
+            metrics = trainer.model_update(batch)
             if _u % 50 == 0:   # live telemetry between iteration commits
                 run.log({"live/loss_total": metrics["loss/total"],
                          "live/model_update": trainer.step})
@@ -192,9 +195,13 @@ def run_single_task(cfg: DictConfig, device: str):
         # ~100 updates per run and pinned all schedule-ablation arms at
         # random-policy level; the config key was always meant to be consumed)
         for _ in range(cfg.training.behaviour_updates_per_iter):
-            z0 = trainer.encoder(
-                buffer.sample(cfg.optim.batch_size)[0].to(device)).detach()
-            metrics |= trainer.behaviour_update(z0)
+            if trainer.transformer_enabled:   # transformer seeds the rollout from a window
+                metrics |= trainer.behaviour_update(
+                    buffer.sample_windows(cfg.optim.batch_size, trainer.tf_window))
+            else:
+                z0 = trainer.encoder(
+                    buffer.sample(cfg.optim.batch_size)[0].to(device)).detach()
+                metrics |= trainer.behaviour_update(z0)
 
         metrics["env_steps"] = env_steps
         iteration = env_steps // cfg.training.steps_per_iter
@@ -324,11 +331,19 @@ def run_multitask(cfg: DictConfig, device: str):
 
         # ---- model + behaviour learning ----
         for _ in range(cfg.training.model_updates_per_iter):
-            metrics = trainer.model_update(buffer.sample(cfg.optim.batch_size))
+            if trainer.transformer_enabled:
+                metrics = trainer.model_update(
+                    buffer.sample_windows(cfg.optim.batch_size, trainer.tf_window))
+            else:
+                metrics = trainer.model_update(buffer.sample(cfg.optim.batch_size))
         for _ in range(cfg.training.behaviour_updates_per_iter):
-            ob, _, _, _, tb = buffer.sample(cfg.optim.batch_size)
-            z0 = trainer.encoder(ob.to(device)).detach()
-            bmetrics = trainer.behaviour_update(z0, tb.to(device))
+            if trainer.transformer_enabled:
+                bmetrics = trainer.behaviour_update(
+                    buffer.sample_windows(cfg.optim.batch_size, trainer.tf_window))
+            else:
+                ob, _, _, _, tb = buffer.sample(cfg.optim.batch_size)
+                z0 = trainer.encoder(ob.to(device)).detach()
+                bmetrics = trainer.behaviour_update(z0, tb.to(device))
         metrics |= bmetrics
         metrics["env_steps"] = env_steps
 

@@ -200,6 +200,28 @@ model:
                         # 1.0 = default init. Pairs with reward_adapt.entropy_floor.
   symlog_reward: true   # reward model predicts symlog(r); imagination symexps it back
   reward_heads: 3       # ensemble: shared trunk + N linear heads (1 = plain model)
+  # TRANSFORMER-IN-THE-LOOP (model.transformer.enabled): a latent encode-decode that
+  # REPLACES the external imagination horizon with an INTERNAL half-window. The shared
+  # encoder z is windowed [z_{k-h/2}..z_k]; the transformer predicts [z_k..z_{k+h/2}];
+  # the dynamics operator op_d (tanh, dissipative) and policy operator op_p (sigmoid,
+  # conservative) are applied to the transformer OUTPUT vector. Requires the dual-latent
+  # TWIN operator path (model.dual_latent.enabled + mode=twin + dynamics=operator); the
+  # attention map gives a per-connection error-attribution snapshot for op_d and op_p.
+  # A SEPARATE gated path (_model_update_transformer / _behaviour_update_transformer) —
+  # when disabled (default) every existing path is byte-for-byte unchanged.
+  transformer:
+    enabled: false      # off = legacy. on = transformer-in-the-loop (next-experiment arm)
+    d_model: 128        # transformer width
+    nhead: 4            # attention heads (the per-head attn IS the attribution surface)
+    layers: 2           # encoder-layer depth
+    half_window: 8      # INTERNAL horizon h/2: window is [z_{k-h/2}..z_k]->[z_k..z_{k+h/2}].
+                        # The behaviour rollout uses H = half_window (no external horizon).
+    dropout: 0.0        # 0 = deterministic given input (bitwise-resume safe)
+    w_future: 1.0       # weight on the transformer's future-window prediction MSE
+    w_attrib: 0.0       # weight on the attention error-attribution penalty (0 = pure
+                        # diagnostic snapshot; >0 also penalizes diffuse error blame)
+    act_d: tanh         # op_d output activation (dissipative dynamics): tanh
+    act_p: sigmoid      # op_p output activation (conservative policy): sigmoid
 
 penalty:
   n_probes: 2           # validated default (R4); sweep {1,2,4,8} = experiment 3

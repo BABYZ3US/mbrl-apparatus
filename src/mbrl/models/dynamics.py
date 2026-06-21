@@ -101,11 +101,20 @@ class OperatorDynamics(nn.Module):
     def __init__(self, latent_dim: int, action_dim: int, hidden: int = 256,
                  depth: int = 2, structure: str = "none", rank: int = 0,
                  radius_min: float = 0.0, radius_max: float = 1.0,
-                 init_shift: float = 1.0):
+                 init_shift: float = 1.0, activation: "str | None" = None):
         super().__init__()
         self.k, self.m = latent_dim, action_dim
         self.structure = str(structure)
         self.rank = int(rank)
+        # Output squash for the transformer-operator mode: None (default) keeps the
+        # pure affine map A(z)z+B(z)a BYTE-EXACT (no nonlinearity); 'tanh' realizes
+        # dissipative dynamics, 'sigmoid' a conservative policy. Validated here so an
+        # unknown value fails at construction, not silently in forward().
+        if activation not in (None, "tanh", "sigmoid"):
+            raise ValueError(
+                f"OperatorDynamics: unknown activation {activation!r}; "
+                "expected None, 'tanh', or 'sigmoid'")
+        self.activation = activation
         # identity-shift coefficient of the near-I init: A = rawA + init_shift·I.
         # init_shift=1 ⇒ |λ|≈1 (marginal, the default). init_shift=1/√2≈0.707 ⇒
         # |λ|²≈1/2 at init — half the latent energy retained per step, half renewed:
@@ -146,7 +155,15 @@ class OperatorDynamics(nn.Module):
 
     def forward(self, z: Tensor, a: Tensor) -> Tensor:
         A, B = self.operators(z)
-        return (A @ z.unsqueeze(-1)).squeeze(-1) + (B @ a.unsqueeze(-1)).squeeze(-1)
+        out = (A @ z.unsqueeze(-1)).squeeze(-1) + (B @ a.unsqueeze(-1)).squeeze(-1)
+        # With an activation set the per-action 2nd derivative is no longer exactly
+        # zero (R15 holds ONLY for activation=None); this squashed path is for the
+        # transformer-operator mode.
+        if self.activation == "tanh":
+            return torch.tanh(out)
+        if self.activation == "sigmoid":
+            return torch.sigmoid(out)
+        return out
 
     def structural_penalties(self, z: Tensor) -> dict:
         """Operator-bundle regularizers on a batch z (B,k). First-order only (no

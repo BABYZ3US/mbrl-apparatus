@@ -21,7 +21,7 @@ import torch.nn.functional as F
 
 from ..models import (Encoder, EMAEncoder, VAEEncoder, CustomEncoder, AffineDynamics,
                       GaussianAffineDynamics, FullMLPDynamics, OperatorDynamics,
-                      RewardModel, Policy, ValueFn, DualLatent)
+                      RewardModel, Policy, ValueFn, DualLatent, LatentTransformer)
 from ..models.ensemble import EnsembleAffineDynamics
 from ..models.planner import SequencePlanner
 from ..models.reward import symlog, symexp
@@ -263,6 +263,38 @@ class Trainer:
                                           device=device, requires_grad=True)
             self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=float(_aa.get("lr", 1e-3)))
 
+        # TRANSFORMER-IN-THE-LOOP (model.transformer.enabled, PM 2026-06-21): a latent
+        # encode-decode WINDOW model that REPLACES the external imagination horizon with
+        # an INTERNAL half-window. The shared encoder z is windowed [z_{k-h/2}..z_k]; the
+        # transformer predicts [z_k..z_{k+h/2}]; op_d (tanh, dissipative) and op_p
+        # (sigmoid, conservative) are applied to the transformer OUTPUT vector — the
+        # energy/entropy asymmetry by construction. Requires the dual-latent TWIN path.
+        # Separate gated methods (_model_update_transformer / _behaviour_update_transformer);
+        # disabled (default) ⇒ every existing path is byte-for-byte unchanged.
+        _tf = dict(cfg.model.get("transformer", {}) or {})
+        self.transformer_enabled = bool(_tf.get("enabled", False))
+        self.latent_tf = None
+        if self.transformer_enabled:
+            if not (self.dual_latent and self.dual is not None and self.dual.mode == "twin"):
+                raise ValueError("model.transformer requires model.dual_latent.enabled "
+                                 "with mode=twin (op_d/op_p carry the tanh/sigmoid split)")
+            if self.enc_vae:
+                raise ValueError("model.transformer needs a deterministic z per window "
+                                 "step; the VAE encoder is not supported on this path")
+            self.tf_half = max(1, int(_tf.get("half_window", 8)))
+            self.tf_window = 2 * self.tf_half + 1   # full sampled window [z_{k-h/2}..z_{k+h/2}]
+            self.tf_w_future = float(_tf.get("w_future", 1.0))
+            self.tf_w_attrib = float(_tf.get("w_attrib", 0.0))
+            self.latent_tf = LatentTransformer(
+                k, d_model=int(_tf.get("d_model", 128)), nhead=int(_tf.get("nhead", 4)),
+                layers=int(_tf.get("layers", 2)), half_window=self.tf_half,
+                dropout=float(_tf.get("dropout", 0.0))).to(device)
+            # apply the dissipative/conservative output squashes to the EXISTING twin
+            # operators (OperatorDynamics.activation is read in forward()): op_d→tanh
+            # (det<1, contracts/forgets), op_p→sigmoid (kept conservative).
+            self.dual.op_d.activation = str(_tf.get("act_d", "tanh"))
+            self.dual.op_p.activation = str(_tf.get("act_p", "sigmoid"))
+
         # Transformer action-sequence planner (planner.enabled): REPLACES the
         # per-step MLP policy as the actor. It emits an H-step plan from z0; the
         # affine T still predicts the latents (R15); the same imagination +
@@ -283,6 +315,8 @@ class Trainer:
         _model_params = [*self.encoder.parameters(), *self.reward.parameters()]
         _model_params += (list(self.dual.parameters()) if self.dual_latent
                           else list(self.dynamics.parameters()))
+        if self.latent_tf is not None:       # transformer-in-the-loop trains with the model
+            _model_params += list(self.latent_tf.parameters())
         if self.energy is not None:          # cf5 lyapunov energy head trains with the model
             _model_params += list(self.energy.parameters())
         self.model_opt = torch.optim.AdamW(_model_params, lr=cfg.optim.model_lr)
@@ -1058,6 +1092,8 @@ class Trainer:
     def model_update(self, batch) -> dict:
         self._apply_lr_schedule()      # tie model LR to lambda's exponent (no-op when off)
         self._anneal_operator_radius()  # decay the svband ceiling toward radius_max (no-op when off)
+        if self.transformer_enabled:   # transformer-in-the-loop: batch is a WINDOW tuple
+            return self._model_update_transformer(batch)
         if self.dual_latent:
             return self._model_update_dual(batch)
         obs, a, r, obs_next, tau, z, z_next_tgt, vae_terms, vae_metrics = self._encode_batch(batch)
@@ -1647,6 +1683,8 @@ class Trainer:
 
     # ---------------- behaviour learning (Dreamer lambda-returns) ----------------
     def behaviour_update(self, z0: torch.Tensor, tau0: torch.Tensor | None = None) -> dict:
+        if self.transformer_enabled:   # z0 is the WINDOW tuple in transformer mode
+            return self._behaviour_update_transformer(z0)
         if self.dual_latent:
             return self._behaviour_update_dual(z0, tau0)
         cfg_i = self.cfg.imagination
@@ -1969,6 +2007,177 @@ class Trainer:
                     pt.lerp_(pp, 1.0 - decay)
         self._update_policy_ema()
         return entropy, pi_loss, v_loss, align_val, gnorm
+
+    # ------------- transformer-in-the-loop path (model.transformer.enabled) -------------
+    def _encode_window(self, batch):
+        """Window prologue for the transformer path: a window batch (tensors shaped
+        [B, L, *], L = self.tf_window) -> device + per-step encode. Returns
+        (obs_w, a_w, r_w, on_w, tau_w, z_w, z_next_w); z_w are the encoded latents
+        [B, L, k] and z_next_w the EMA-target latents of obs_next. The MLP/custom
+        encoder is deterministic so a window of z's is well-defined (VAE rejected at
+        construction). No self.gen draws."""
+        if self.task_dim:
+            obs_w, a_w, r_w, on_w, tau_w = (x.to(self.device) for x in batch)
+        else:
+            obs_w, a_w, r_w, on_w = (x.to(self.device) for x in batch)
+            tau_w = None
+        B, L, od = obs_w.shape
+        z_w = self.encoder(obs_w.reshape(B * L, od)).reshape(B, L, -1)
+        with torch.no_grad():
+            z_next_w = self.ema(on_w.reshape(B * L, od)).reshape(B, L, -1)
+        return obs_w, a_w, r_w, on_w, tau_w, z_w, z_next_w
+
+    def _model_update_transformer(self, batch) -> dict:
+        """Model update for the transformer-in-the-loop arm. The shared encoder z is
+        windowed; the transformer encode-decodes [z_{k-h/2}..z_k] -> [z_k..z_{k+h/2}];
+        op_d (tanh, dissipative) and op_p (sigmoid, conservative) act on the transformer
+        OUTPUT vector. Losses: (1) the transformer's future-window forecast MSE, (2) the
+        one-step dynamics op_d(out)->d_{k+1} MSE (dynamics prediction of next state vs
+        the ACTUAL next state), (3) reward fit in p-coords, (4) op_p consistency, (5) the
+        twin structural priors / Stein / det(op_p) (the energy/entropy asymmetry), and an
+        OPTIONAL (6) attention error-attribution penalty. The per-connection attribution
+        (which past states sourced the error, for op_d and op_p) is logged as a snapshot.
+        Twin-only; reuses _model_step."""
+        dl = self.dual
+        obs_w, a_w, r_w, on_w, tau_w, z_w, z_next_w = self._encode_window(batch)
+        hw = self.tf_half
+        z_in = z_w[:, :hw + 1, :]                       # past half [z_{k-h/2}..z_k]
+        z_future_tgt = z_w[:, hw:, :].detach()          # actual future half [z_k..z_{k+h/2}]
+        tf = self.latent_tf(z_in, need_attn=True)
+        pred, out, attn = tf["pred"], tf["out"], tf["attn"]
+
+        # (1) the transformer's own future-window forecast vs the actual future latents
+        tf_loss = F.mse_loss(pred, z_future_tgt)
+
+        # operators applied to the OUTPUT vector (the k+1 prediction)
+        d_out, p_out = dl.d_of(out), dl.p_of(out)
+        a_k = a_w[:, hw, :]                              # action at the current step k
+        z_next_k = z_w[:, hw + 1, :].detach()           # actual z_{k+1}
+        d_next, p_next = dl.d_of(z_next_k), dl.p_of(z_next_k)
+        # (2) one-step dynamics: op_d (tanh) prediction of next state vs ACTUAL next state
+        d_pred = dl.op_d(d_out, a_k)
+        dyn_loss = F.mse_loss(d_pred, d_next)
+        # (4) policy-operator consistency: op_p (sigmoid) prediction vs actual next p
+        p_pred = dl.op_p(p_out, a_k)
+        pcons = F.mse_loss(p_pred, p_next)
+        # (3) reward fit in p-coords at step k
+        tau_k = tau_w[:, hw, :] if tau_w is not None else None
+        r_target = self._reward_target(r_w[:, hw])
+        rew_loss = F.mse_loss(self.reward(p_out, a_k, tau_k), r_target)
+
+        loss = self.tf_w_future * tf_loss + dyn_loss + rew_loss + self.pconsist_w * pcons
+
+        # (5) twin operator structural priors + Stein(op_d) + det(op_p) — the dissipative-
+        # op_d / conservative-op_p energy/entropy asymmetry. Reuse the dual machinery on
+        # d_out/p_out (phased SVD honoured via struct_every).
+        op_metrics = {}
+        if self.step % self.struct_every == 0:
+            _cache = {}
+            for i, op in enumerate(dl.operators()):
+                tag = "_d" if i == 0 else "_p"
+                zin = d_out.detach() if i == 0 else p_out.detach()
+                w = self.op_w_p if i == 1 else self.op_w
+                _cache |= {f"{kk}{tag}": vv for kk, vv in op.spectral_summary(zin).items()}
+                if any(w.values()):
+                    sp = op.structural_penalties(zin)
+                    loss = loss + sum(w[kk] * sp[kk] for kk in w)
+                    _cache |= {f"op/pen_{kk}{tag}": float(sp[kk].detach()) for kk in sp}
+            self._op_metrics_cache = _cache
+        op_metrics |= self._op_metrics_cache
+        if self.lyap_w > 0.0:        # Stein consistency on op_d: G = A G Aᵀ + Q̂
+            A_d, _ = dl.op_d.operators(d_out)
+            yhat = (A_d @ d_out.unsqueeze(-1)).squeeze(-1)
+            N_ = float(d_out.shape[0])
+            G = d_out.t() @ d_out / N_
+            S_auto = yhat.t() @ yhat / N_
+            R = d_next - d_pred
+            Q_hat = R.t() @ R / N_
+            stein = (G - S_auto - Q_hat).pow(2).mean()
+            loss = loss + self.lyap_w * stein
+            op_metrics["op/lyap_stein"] = float(stein.detach())
+        if self.detpos_w > 0.0:      # det(op_p) >= floor > 0 (conservative, GL⁺)
+            A_p, _ = dl.op_p.operators(p_out)
+            det_p = torch.linalg.det(A_p)
+            detpos = torch.relu(self.detpos_floor - det_p).pow(2).mean()
+            loss = loss + self.detpos_w * detpos
+            op_metrics["op/detpos"] = float(detpos.detach())
+            op_metrics["op/det_p_mean"] = float(det_p.detach().mean())
+
+        # (6) attention error-attribution SNAPSHOT: which past states (the transformer's
+        # state↔state connections) sourced the prediction error, for op_d and op_p. attn
+        # averaged over layers+heads; the current-token (last input) row is its
+        # attribution over the past window. Penalty (w_attrib>0) discourages error that is
+        # sourced through DIFFUSE attention (the model can't localize its mistake).
+        attrib_metrics = {}
+        attrib_pen = z_w.new_zeros(())
+        if attn is not None:
+            attn_m = attn.mean(dim=(1, 2))               # [B, Lin, Lin]
+            src = attn_m[:, -1, :]                        # [B, Lin] current-token attribution
+            e_d = (d_pred - d_next).pow(2).mean(-1).detach()   # [B] per-sample dyn error
+            e_p = (p_pred - p_next).pow(2).mean(-1).detach()   # [B] per-sample policy error
+            with torch.no_grad():
+                attrib_d = (e_d.unsqueeze(-1) * src).mean(0)   # [Lin] dyn error by source
+                attrib_p = (e_p.unsqueeze(-1) * src).mean(0)   # [Lin] policy error by source
+                sclamp = src.clamp_min(1e-9)
+                ent = -(sclamp * sclamp.log()).sum(-1).mean()
+                attrib_metrics = {
+                    "tf/attn_entropy": float(ent),
+                    "tf/attrib_d_max": float(attrib_d.max()),
+                    "tf/attrib_d_recent": float(attrib_d[-1]),   # blame on z_k itself
+                    "tf/attrib_p_max": float(attrib_p.max()),
+                    "tf/attrib_p_recent": float(attrib_p[-1]),
+                }
+            if self.tf_w_attrib > 0.0:
+                ew = (e_d + e_p).unsqueeze(-1) * src         # [B, Lin] error-weighted attn
+                p_norm = ew / ew.sum(-1, keepdim=True).clamp_min(1e-9)
+                pn = p_norm.clamp_min(1e-9)
+                attrib_pen = -(pn * pn.log()).sum(-1).mean()  # diffuse-blame entropy
+                loss = loss + self.tf_w_attrib * attrib_pen
+
+        self._model_step(loss, 0.0)   # pen_val=0: tf mode has no external-horizon EMA
+
+        z_flat = z_w.reshape(-1, z_w.shape[-1])
+        z_std_now = z_flat.detach().std(0).mean().item()
+        out_dict = {"loss/dyn": dyn_loss.item(), "loss/reward": rew_loss.item(),
+                    "loss/total": loss.item(), "step": self.step,
+                    "tf/future_mse": float(tf_loss.detach()),
+                    "tf/p_consistency": float(pcons.detach()),
+                    "tf/attrib_pen": (float(attrib_pen.detach())
+                                      if self.tf_w_attrib > 0.0 else 0.0),
+                    "tf/half_window": hw, "latent/z_std": z_std_now,
+                    **op_metrics, **attrib_metrics,
+                    **self._representation_readouts(z_flat)}
+        return out_dict
+
+    def _behaviour_update_transformer(self, batch) -> dict:
+        """Behaviour update for the transformer arm. The transformer turns the current
+        window into the rollout SEED (its k+1 output latent) and SETS the horizon
+        (H = half_window, internal to the architecture — there is no external horizon).
+        The validated dual rollout/returns/policy-value machinery then trains the actor
+        on op_p (sigmoid) imagined rollouts of that length."""
+        obs_w, a_w, r_w, on_w, tau_w, z_w, z_next_w = self._encode_window(batch)
+        hw = self.tf_half
+        z_in = z_w[:, :hw + 1, :].detach()
+        with torch.no_grad():
+            seed = self.latent_tf(z_in, need_attn=False)["out"].detach()   # [B,k] k+1 latent
+        tau0 = tau_w[:, hw, :] if tau_w is not None else None
+        cfg_i = self.cfg.imagination
+        gamma, lam_ret = cfg_i.gamma, cfg_i.get("lambda_", 0.95)
+        H = hw                              # INTERNAL horizon = the transformer half-window
+        ent_coef = cfg_i.get("entropy_coef", 3e-4)
+        self._reward_clip_over = self._reward_clip_tot = 0.0
+        ps, rs, logps, excite_now, noise_std = self._imagine_rollout_dual(seed, tau0, H)
+        returns, adv, norm = self._returns_and_scale(ps, rs, tau0, H, cfg_i, gamma, lam_ret)
+        entropy, pi_loss, v_loss, align_val, gnorm = self._policy_value_step_dual(
+            ps, returns, adv, norm, logps, ent_coef, tau0, H, cfg_i)
+        return {"loss/value": v_loss.item(), "loss/policy": pi_loss.item(),
+                "policy/entropy": entropy.item(), "policy/ret_scale": self.ret_scale,
+                "imagine/horizon": H, "imagine/return_mean": returns.mean().item(),
+                "imagine/return_var": returns.var().item(),
+                "imagine/align": align_val, "actor/grad_norm": float(gnorm),
+                "stab/nonfinite_skips": self._nonfinite_skips,
+                "stab/value_grad_norm": self._last_value_grad_norm,
+                "excite/gate": float(excite_now), "excite/noise_std": float(noise_std)}
 
     def _behaviour_update_dual(self, z0: torch.Tensor, tau0=None) -> dict:
         """Imagine in the POLICY latent p (shared: roll backbone z, read p=P(z);

@@ -5,6 +5,8 @@ from .reward import RewardModel
 from .policy import Policy, ValueFn
 from .spectral import SpectralReward
 from .dual_latent import DualLatent
+from .latent_transformer import LatentTransformer
 
 __all__ = ["Encoder", "EMAEncoder", "AffineDynamics", "OperatorDynamics",
-           "RewardModel", "Policy", "ValueFn", "SpectralReward", "DualLatent"]
+           "RewardModel", "Policy", "ValueFn", "SpectralReward", "DualLatent",
+           "LatentTransformer"]
