@@ -206,13 +206,15 @@ cd ~/Claude/Projects/math/godot_studio
 ./tools/tunnel_runpod.sh root@<pod-ip> -p <ssh-port> --launch   # tunnel + studio, one command
 # — or in two terminals —
 ./tools/tunnel_runpod.sh root@<pod-ip> -p <ssh-port>            # terminal 1: holds the tunnel
-./run_studio.sh --port 9009                                     # terminal 2: dials 127.0.0.1:9009
+./run_studio.sh --no-bridge -- --port 9009                     # terminal 2: dials 127.0.0.1:9009
 ```
-`--port 9009` is the launch-time backend override: the shell upserts+selects a `launch`
-profile (visible in the status-bar backend picker) and dials it on boot. Use
-`--apparatus 127.0.0.1:9010` / `--local 9010` if 9009 is taken locally; `--host <ip>
---port <p>` points at a non-tunnel address. The pod's ip:port changes on every restart —
-re-copy it each time.
+`--no-bridge` is **essential**: the bridge runs **on the pod**, so the local studio must NOT
+start its own. (Without it, `spine-studio` starts a local bridge on 9009 — colliding with the
+tunnel and training on your Mac instead of the pod.) Everything **after `--`** is a Godot
+launch-time backend override: `--port 9009` upserts+selects a `launch` profile (visible in the
+status-bar backend picker) dialing 127.0.0.1:9009 = the tunnel. Use `-- --apparatus
+127.0.0.1:9010` / `--local 9010` if 9009 is taken locally; `-- --host <ip> --port <p>` for a
+non-tunnel address. The pod's ip:port changes on every restart — re-copy it each time.
 
 ---
 
