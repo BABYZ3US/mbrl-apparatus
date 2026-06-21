@@ -157,6 +157,12 @@ def run_single_task(cfg: DictConfig, device: str):
     ckpt.install_signal_handler(trainer, lambda: env_steps)
 
     num_envs = int(cfg.training.get("num_envs", 1))
+    if trainer.transformer_enabled and num_envs > 1:
+        raise ValueError(
+            "model.transformer requires training.num_envs=1: the transformer samples "
+            "consecutive-latent windows, but the vectorized collector interleaves "
+            "sub-envs in the replay buffer (consecutive rows would be different envs). "
+            "Set training.num_envs=1 for the transformer-in-the-loop arm.")
     env = make_env(cfg, num_envs)
     obs, _ = env.reset(seed=cfg.seed)
     autoreset = np.zeros(num_envs, dtype=bool)
@@ -323,7 +329,7 @@ def run_multitask(cfg: DictConfig, device: str):
                 a, _ = trainer.policy.sample(z, tau_t)
             a_np = a.squeeze(0).cpu().numpy()
             obs_next, r, term, trunc, _ = env.step(a_np)
-            buffer.add(obs, a_np, r, obs_next, tau=env.tau)
+            buffer.add(obs, a_np, r, obs_next, tau=env.tau, done=bool(term or trunc))
             obs = obs_next
             env_steps += 1
             if term or trunc:

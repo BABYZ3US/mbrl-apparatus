@@ -51,7 +51,7 @@ def worker(worker_id: int, args) -> str:
                 z = encoder(torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0))
                 a = policy.sample(z)[0].squeeze(0).numpy()
         obs_next, r, term, trunc, _ = env.step(a)
-        buf.add(obs, a, r, obs_next)
+        buf.add(obs, a, r, obs_next, done=bool(term or trunc))
         obs = obs_next
         if term or trunc:
             obs, _ = env.reset()
