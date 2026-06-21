@@ -194,7 +194,7 @@ def run_name_for_spec(spec: dict, seed: int | None = None) -> str:
 def write_experiment_yaml(spec: dict, out_dir: Path, name: str) -> Path:
     """Write the merged spec as a `# @package _global_` experiment yaml.
 
-    Returns the path written: <out_dir>/<name>.yaml. The leading
+    Returns the path written: <out_dir>/experiment/<name>.yaml. The leading
     "# @package _global_" directive makes Hydra splice the file's keys at the
     config ROOT (the same convention configs/experiment/champion.yaml uses), so
     `+experiment=<name>` with out_dir on the search path reproduces the graph.
@@ -203,7 +203,13 @@ def write_experiment_yaml(spec: dict, out_dir: Path, name: str) -> Path:
     self-describing (train.py reads cfg.experiment.name for the run id).
     """
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Hydra resolves `+experiment=<name>` against the `experiment` config GROUP —
+    # i.e. `<search-path-root>/experiment/<name>.yaml` — so the file must live under an
+    # `experiment/` subdir of out_dir (and out_dir, the group's parent, is what goes on
+    # hydra.searchpath). Writing it flat at out_dir/<name>.yaml left the group
+    # unresolvable and real launches failed with "experiment '<name>' not found".
+    grp_dir = out_dir / "experiment"
+    grp_dir.mkdir(parents=True, exist_ok=True)
 
     body: dict = _deepcopy_jsonish(spec)
     exp = body.get("experiment")
@@ -218,7 +224,7 @@ def write_experiment_yaml(spec: dict, out_dir: Path, name: str) -> Path:
         "# Splices at the config root like configs/experiment/champion.yaml.\n"
         + yaml.safe_dump(body, sort_keys=True, default_flow_style=False)
     )
-    path = out_dir / f"{name}.yaml"
+    path = grp_dir / f"{name}.yaml"
     path.write_text(text)
     return path
 

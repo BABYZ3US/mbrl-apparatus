@@ -106,7 +106,7 @@ def test_write_experiment_yaml_is_parseable_global_package(tmp_path):
     spec = {"model": {"dynamics": "gaussian"},
             "spectral": {"enabled": True, "poly": {"degrees": [1, 3]}}}
     path = s2c.write_experiment_yaml(spec, tmp_path, "champ")
-    assert path == tmp_path / "champ.yaml"
+    assert path == tmp_path / "experiment" / "champ.yaml"
     text = path.read_text()
     assert text.splitlines()[0] == "# @package _global_"   # Hydra root-splice directive
     loaded = yaml.safe_load(text)                            # body must parse

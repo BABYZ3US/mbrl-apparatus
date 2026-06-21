@@ -326,7 +326,9 @@ class StudioBridgeServer:
         argv = [self.python_exe, "scripts/train.py"]
         # let `+experiment=<name>` resolve the just-written yaml without touching
         # configs/ (owned by another agent): append its dir to Hydra's searchpath
-        argv.append(f"hydra.searchpath=[file://{yaml_path.parent.as_posix()}]")
+        # yaml is at <dir>/experiment/<name>.yaml; searchpath = its grandparent <dir>
+        # so Hydra resolves `+experiment=<name>` as the group <dir>/experiment/<name>.
+        argv.append(f"hydra.searchpath=[file://{yaml_path.parent.parent.as_posix()}]")
         argv.extend(overrides)
         return argv, run_name, yaml_path
 
