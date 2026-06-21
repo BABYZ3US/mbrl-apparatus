@@ -345,6 +345,17 @@ def run_multitask(cfg: DictConfig, device: str):
                 metrics["eval/return"] - metrics["eval/zeroshot_interp"]
             metrics["eval/per_task"] = {str(k): v for d in (tr, ip, ex)
                                         for k, v in d.items()}
+            # Flatten the per-task dict into scalar keys so each task's return is
+            # logged and plottable (run.log below drops dict-valued entries). Key
+            # the curve by the task parameter tau itself, formatted at fixed 3-dp
+            # precision (matching the np.round(_, 3) used to build the splits): a
+            # value-based key is readable AND stable across iterations/runs because
+            # the same tau always maps to the same key regardless of dict order or
+            # the train-split shuffle. The +.3f width also collapses float noise
+            # (e.g. -1.4000000000000001 -> "-1.400") into one stable key.
+            for d in (tr, ip, ex):
+                for tau, value in d.items():
+                    metrics[f"eval/task/{float(tau):+.3f}"] = float(value)
 
         run.log({k: v for k, v in metrics.items() if not isinstance(v, dict)})
         local_log.log(metrics)

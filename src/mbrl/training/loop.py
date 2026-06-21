@@ -347,6 +347,15 @@ class Trainer:
         self.value_clip = float(cfg.optim.get("value_clip", 0.0) or 0.0)
         self.skip_nonfinite = bool(cfg.optim.get("skip_nonfinite", False))
         self._nonfinite_skips = 0   # diagnostic counter (checkpointed for bitwise resume)
+        # pure-diagnostic scalars (no behaviour/RNG impact): closed-form spectral
+        # fit quality (set in _spectral_refit) and per-rollout reward-clip
+        # accumulators (set in _imagined_reward, reset per behaviour_update).
+        self._last_fit_mse = 0.0
+        self._last_fit_r2 = 0.0
+        self._reward_clip_over = 0.0   # # imagined rewards over reward_clip this rollout
+        self._reward_clip_tot = 0.0    # # imagined rewards seen this rollout
+        self._last_return_clip_frac = 0.0   # frac λ-returns over return_clip (last step)
+        self._last_value_grad_norm = 0.0    # pre-clip value-opt grad norm (last step)
         # Policy INERTIA (PM 2026-06-13): give the policy extra inertia relative to
         # the (faster) operator — a two-timescale stabilizer against the collapse
         # (the policy lunging at transient model errors). A slow EMA of the policy
@@ -663,6 +672,20 @@ class Trainer:
             _, self.spec_snr_info = snr_band_weights(
                 h0.features(X), y, h0.w2.sqrt(),
                 n_bands=self.spec_snr_bands, generator=self.spec_snr_gen)
+        # closed-form fit quality (diagnostic, in-sample on the SAME cache the
+        # heads were just fit on): ensemble-mean prediction MSE + R^2. Pure
+        # observation under no_grad — no grad-bearing ops, no self.gen draws, no
+        # change to the fit above. Stashed on self; emitted with the other
+        # spectral/* keys in model_update. (No held-out slice is maintained for
+        # the rolling cache, so this is honestly in-sample; named fit_* not val_*.)
+        if self.spec_heads:
+            with torch.no_grad():
+                pred = torch.stack([h.predict(X) for h in self.spec_heads]).mean(0)
+                ss_res = (y - pred).pow(2).sum()
+                ss_tot = (y - y.mean()).pow(2).sum()
+                self._last_fit_mse = float((y - pred).pow(2).mean())
+                self._last_fit_r2 = (float(1.0 - ss_res / ss_tot)
+                                     if float(ss_tot) > 1e-12 else 0.0)
         self.spec_refits += 1
         self.spec_since_refit = 0
 
@@ -1046,6 +1069,9 @@ class Trainer:
                 spec_metrics["spectral/sigma_star"] = self.spec_sigma_star
                 spec_metrics["spectral/recal_rebuilds"] = getattr(
                     self, "spec_recal_rebuilds", 0)
+            if self.spec_refits > 0:   # closed-form fit quality (diagnostic, in-sample)
+                spec_metrics["spectral/fit_mse"] = self._last_fit_mse
+                spec_metrics["spectral/fit_r2"] = self._last_fit_r2
             if self.spec_sigma == "learned" and self.spec_heads:
                 with torch.no_grad():   # effective per-block sigmas, head 0
                     h0 = self.spec_heads[0]
@@ -1057,6 +1083,8 @@ class Trainer:
                 if inf.get("band_snrs"):
                     spec_metrics["spectral/snr_min"] = min(inf["band_snrs"])
                     spec_metrics["spectral/snr_max"] = max(inf["band_snrs"])
+                    for _bi, _bsnr in enumerate(inf["band_snrs"]):   # per-band SNR ladder
+                        spec_metrics[f"spectral/band_snr{_bi:02d}"] = float(_bsnr)
                 if "w_at_snr1" in inf:  # sigma_eff at the SNR=1 cutoff —
                     # the user's hypothesis: this sits at sigma = 1
                     spec_metrics["spectral/sigma_at_snr1"] = (
@@ -1242,6 +1270,10 @@ class Trainer:
             std = heads.std(0)
             rew, dis = heads.mean(0) - self.pessimism * std, std.mean().detach()
         if self.reward_clip > 0.0:   # cf4: cap imagined reward so an expansive op_p
+            with torch.no_grad():   # diagnostic: pre-clip over-threshold fraction
+                self._reward_clip_over += float(
+                    (rew.detach().abs() > self.reward_clip).sum())
+                self._reward_clip_tot += float(rew.numel())
             rew = rew.clamp(-self.reward_clip, self.reward_clip)   # can't blow returns to inf
         return rew, dis
 
@@ -1351,6 +1383,9 @@ class Trainer:
             returns = lambda_returns(rs, v_tgt, gamma, lam_ret)       # (H, B)
             adv = None
         if self.return_clip > 0.0:   # cf4: hard-bound the λ-returns (and GAE advantage)
+            with torch.no_grad():   # diagnostic: pre-clip over-threshold fraction (returns)
+                self._last_return_clip_frac = float(
+                    (returns.detach().abs() > self.return_clip).float().mean())
             returns = returns.clamp(-self.return_clip, self.return_clip)  # so a diverged
             if adv is not None:                                           # imagined rollout
                 adv = adv.clamp(-self.return_clip, self.return_clip)      # can't NaN the loss
@@ -1467,7 +1502,11 @@ class Trainer:
             else:
                 self._nonfinite_skips += 1
         else:
+            # measure-only inf-norm (no-op clip, mirrors the model-loss path) so
+            # the pre-clip value grad norm is ALWAYS available as a diagnostic
+            vnorm = torch.nn.utils.clip_grad_norm_(self.value.parameters(), float("inf"))
             self.value_opt.step()
+        self._last_value_grad_norm = float(vnorm)   # pre-clip; reveals value_clip hits
 
         # --- EMA target value + (optional) EMA policy ---
         decay = cfg_i.get("value_target_decay", 0.98)
@@ -1496,6 +1535,7 @@ class Trainer:
         gamma, lam_ret = cfg_i.gamma, cfg_i.get("lambda_", 0.95)
         H = self._imagination_horizon()
         ent_coef = cfg_i.get("entropy_coef", 3e-4)
+        self._reward_clip_over = self._reward_clip_tot = 0.0   # reset diag accumulators
 
         zs, rs, logps, dis, pen_stats = self._imagine_rollout(z0, tau0, H)
 
@@ -1513,6 +1553,11 @@ class Trainer:
                 "imagine/return_var": returns.var().item(),  # R15 diagnostic
                 "imagine/align": align_val, "actor/grad_norm": float(gnorm),
                 "stab/nonfinite_skips": self._nonfinite_skips,  # cf4: same diagnostic as the dual path
+                "stab/value_grad_norm": self._last_value_grad_norm,   # cf4: pre-clip
+                **({"stab/reward_clip_frac": self._reward_clip_over
+                    / max(self._reward_clip_tot, 1.0)} if self.reward_clip > 0.0 else {}),
+                **({"stab/return_clip_frac": self._last_return_clip_frac}
+                   if self.return_clip > 0.0 else {}),
                 **pen_stats}
 
     # ---------------- dual-latent path (model.dual_latent.enabled) ----------------
@@ -1778,7 +1823,11 @@ class Trainer:
             else:
                 self._nonfinite_skips += 1
         else:
+            # measure-only inf-norm (no-op clip) so the pre-clip value grad norm
+            # is ALWAYS available as a diagnostic
+            vnorm = torch.nn.utils.clip_grad_norm_(self.value.parameters(), float("inf"))
             self.value_opt.step()
+        self._last_value_grad_norm = float(vnorm)   # pre-clip; reveals value_clip hits
         decay = cfg_i.get("value_target_decay", 0.98)
         with torch.no_grad():
             for pt, pp in zip(self.value_target.parameters(), self.value.parameters()):
@@ -1805,6 +1854,7 @@ class Trainer:
         gamma, lam_ret = cfg_i.gamma, cfg_i.get("lambda_", 0.95)
         H = self._imagination_horizon()
         ent_coef = cfg_i.get("entropy_coef", 3e-4)
+        self._reward_clip_over = self._reward_clip_tot = 0.0   # reset diag accumulators
 
         ps, rs, logps, excite_now, noise_std = self._imagine_rollout_dual(z0, tau0, H)
 
@@ -1819,6 +1869,11 @@ class Trainer:
                 "imagine/return_var": returns.var().item(),
                 "imagine/align": align_val, "actor/grad_norm": float(gnorm),
                 "stab/nonfinite_skips": self._nonfinite_skips,
+                "stab/value_grad_norm": self._last_value_grad_norm,   # cf4: pre-clip
+                **({"stab/reward_clip_frac": self._reward_clip_over
+                    / max(self._reward_clip_tot, 1.0)} if self.reward_clip > 0.0 else {}),
+                **({"stab/return_clip_frac": self._last_return_clip_frac}
+                   if self.return_clip > 0.0 else {}),
                 "excite/gate": float(excite_now), "excite/noise_std": float(noise_std)}
 
     def _policy_inertia_term(self):

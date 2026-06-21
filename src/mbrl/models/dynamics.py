@@ -188,9 +188,18 @@ class OperatorDynamics(nn.Module):
         eff_rank = torch.exp(-(p * p.clamp_min(1e-9).log()).sum(-1))   # entropy eff. rank
         At = A.transpose(-1, -2)
         comm = (A @ At - At @ A).pow(2).flatten(-2).sum(-1).sqrt()
-        return {"op/radius": float(sv[..., 0].mean()),
-                "op/eff_rank": float(eff_rank.mean()),
-                "op/normality_resid": float(comm.mean())}
+        out = {"op/radius": float(sv[..., 0].mean()),
+               "op/eff_rank": float(eff_rank.mean()),
+               "op/normality_resid": float(comm.mean())}
+        # per-mode spectrum for the Studio viz: batch-mean of each singular value,
+        # sorted descending (op/sv00 = largest mode on avg). svdvals already
+        # returns σ sorted descending along the last dim (matches sv[...,0]=σ_max
+        # above), so the column index IS the sorted mode index — one scalar per
+        # mode, mirroring latent/eig%02d (training/loop.py).
+        sv_mean = sv.mean(0).detach().cpu()               # (k,), no grad (in no_grad)
+        for i, s in enumerate(sv_mean.tolist()):
+            out[f"op/sv{i:02d}"] = float(s)
+        return out
 
 
 class FullMLPDynamics(nn.Module):
