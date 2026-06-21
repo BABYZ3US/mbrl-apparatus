@@ -206,6 +206,14 @@ into the high-return regime by holding `r⋆`.
    not (no reward-operator `det`).
 5. **Entropy:Lyapunov has no magic constant** — `target_entropy=−dim(A)` is the defensible
    entropy target; the Lyapunov term is a tuned constraint; their coupling is the `r⋆` criticality.
+6. **Refuted relations — do not add to the experiment (the derivations doc asks to forestall
+   rediscovery).** `g_p = 1 + 1/g_d`, `g_p = 1 + eff/H`, and the golden-ratio operator-coupling
+   fixed point are **rejected** as coincidences of two independently band-pinned constants
+   (`derivations_spectral_operator_LQG.md` "Rejected along the way" + `verify_rejected_coincidences.py`).
+   Note the cross-doc tension: `Appendix_C_RL_derivations.md` C.5b still lists `g_p = 1 + 1/g_d`
+   as a "[PROVED structure] to be tested" — the main derivations doc (newer) **supersedes** the
+   seed-appendix here and marks it refuted. The *genuine* conserved invariant from C.5 is the
+   **equal effective rank** of `op_p`/`op_d` (12.23 vs 12.21, ratio 0.998), not the golden ratio.
 
 ## A suggested first combined experiment (you design the real one)
 The cleanest single test that exercises the most of the above on the dual operator latent, at
