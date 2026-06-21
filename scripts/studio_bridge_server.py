@@ -78,6 +78,7 @@ SUBMIT_SPEC = "submit.spec"
 PULL_DATASETS = "pull.datasets"   # v0.1
 PULL_ARTIFACTS = "pull.artifacts"  # F1: per-run artifact manifest
 PULL_SURFACE = "pull.surface"     # v0.1
+PULL_OPERATOR_SPECTRUM = "pull.operator_spectrum"  # op/sv* -> {steps, modes[][], mode_keys}
 SUBMIT_SWEEP = "submit.sweep"     # v0.1
 PULL_SWEEP = "pull.sweep"         # sweep cells: catalog or flattened arm-rows
 PULL_DIAGNOSTICS = "pull.diagnostics"  # PCA/CV reports: catalog or named payload
@@ -248,6 +249,35 @@ def read_metric_since(results_dir: Path, run: str, key: str, since: float) -> di
     if metric_db.has_db(root, run):
         return metric_db.read_metric_since(root, run, key, since)
     return _read_metric_jsonl(results_dir, run, key, since=since)
+
+
+def read_operator_spectrum(results_dir: Path, run: str) -> dict:
+    """Assemble the per-mode operator singular-value spectrum into a 2-D series for
+    the Studio heatmap: {run, steps, modes, mode_keys}, where modes[t] is the
+    spectrum (one value per mode, descending) at steps[t] and mode_keys are the
+    source op/sv## keys in mode order. Empty arrays if the run logs no op/sv* keys
+    (e.g. a spectral/non-operator run). Scans metrics.jsonl (always dual-written);
+    never raises. Only rows carrying the FULL spectrum are returned, so every
+    modes[t] has the same length (a clean heatmap).
+    """
+    pat = re.compile(r"^op/sv\d+$")
+    m = results_dir / run / "metrics.jsonl"
+    rows = list(_read_rows(m)) if m.exists() else []
+    keys = sorted({k for row in rows for k in row if pat.match(k)},
+                  key=lambda k: int(k[len("op/sv"):]))
+    steps: list[float] = []
+    modes: list[list[float]] = []
+    if keys:
+        for row in rows:
+            step = row.get("env_steps", row.get("step"))
+            if not _is_number(step):
+                continue
+            vec = [row.get(k) for k in keys]
+            if any(not _is_number(v) for v in vec):
+                continue  # only fully-logged spectra -> rectangular modes[][]
+            steps.append(float(step))
+            modes.append([float(v) for v in vec])
+    return {"run": run, "steps": steps, "modes": modes, "mode_keys": keys}
 
 
 # (A8 2026-06-09: the legacy pure handle() + list_runs/scan_runs are DELETED —
@@ -594,6 +624,9 @@ class StudioBridgeServer:
             surf = SurfaceIndex(self.results_dir.parent).get_surface(
                 str(data.get("run", "")), step_n)
             return make(PULL_SURFACE, surf, id_)
+        if type_ == PULL_OPERATOR_SPECTRUM:
+            return make(PULL_OPERATOR_SPECTRUM,
+                        read_operator_spectrum(self.results_dir, str(data.get("run", ""))), id_)
         if type_ == SUBMIT_SWEEP:
             return make(SUBMIT_SWEEP, self.submit_sweep(data), id_)
         if type_ == PULL_DIAGNOSTICS:
