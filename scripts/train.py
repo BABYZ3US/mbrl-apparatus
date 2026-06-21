@@ -144,7 +144,13 @@ def run_single_task(cfg: DictConfig, device: str):
                                     "seed": cfg.seed},
                               config=OmegaConf.to_container(cfg, resolve=True))
     trainer = Trainer(cfg, cfg.env.obs_dim, cfg.env.action_dim, device=device)
-    buffer = ReplayBuffer(int(1e6), cfg.env.obs_dim, cfg.env.action_dim, cfg.seed)
+    num_envs = int(cfg.training.get("num_envs", 1))
+    # transformer-in-the-loop needs single-trajectory windows: give the buffer one
+    # lane per env so consecutive-window sampling never mixes envs (lets us collect
+    # from many envs in parallel instead of being stuck at num_envs=1).
+    _lanes = num_envs if trainer.transformer_enabled else 1
+    buffer = ReplayBuffer(int(1e6), cfg.env.obs_dim, cfg.env.action_dim, cfg.seed,
+                          num_lanes=_lanes)
     ckpt = CheckpointManager("checkpoints/" + run.name,
                              OmegaConf.to_container(cfg, resolve=True),
                              every=cfg.checkpoint.every,
@@ -156,13 +162,6 @@ def run_single_task(cfg: DictConfig, device: str):
     env_steps = ckpt.resume(trainer) if cfg.checkpoint.resume == "auto" else 0
     ckpt.install_signal_handler(trainer, lambda: env_steps)
 
-    num_envs = int(cfg.training.get("num_envs", 1))
-    if trainer.transformer_enabled and num_envs > 1:
-        raise ValueError(
-            "model.transformer requires training.num_envs=1: the transformer samples "
-            "consecutive-latent windows, but the vectorized collector interleaves "
-            "sub-envs in the replay buffer (consecutive rows would be different envs). "
-            "Set training.num_envs=1 for the transformer-in-the-loop arm.")
     env = make_env(cfg, num_envs)
     obs, _ = env.reset(seed=cfg.seed)
     autoreset = np.zeros(num_envs, dtype=bool)

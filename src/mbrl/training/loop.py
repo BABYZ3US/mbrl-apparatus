@@ -2495,9 +2495,10 @@ def collect_vectorized(trainer, env, buffer, obs, autoreset, n_steps: int,
         for i in range(num_envs):
             if not autoreset[i]:  # skip the fake post-done boundary transition
                 # done marks the episode-ending transition so consecutive-window
-                # sampling (the transformer arm) never spans an episode reset.
+                # sampling (the transformer arm) never spans an episode reset; lane=i
+                # routes each env to its own ring so windows stay single-trajectory.
                 buffer.add(obs[i], a_np[i], float(r[i]), obs_next[i],
-                           done=bool(term[i] or trunc[i]))
+                           done=bool(term[i] or trunc[i]), lane=i)
         autoreset = np.logical_or(term, trunc)
         obs = obs_next
         taken += num_envs
