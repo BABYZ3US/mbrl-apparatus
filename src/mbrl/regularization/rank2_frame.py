@@ -190,6 +190,21 @@ def spectral_compress_penalty(z: Tensor, floor: float = 0.0, eps: float = 1e-2) 
     return (torch.relu(ev - floor) + eps).sqrt().sum()
 
 
+def sigma_balance_penalty(z: Tensor, sigma_target: float = 0.8) -> Tensor:
+    """σ-scaling / entropy-balance setpoint (sigma_scaling_and_entropy_balance, 2026-06-15).
+
+    The band-pinned spectrum reaches a two-level fill that makes σ = √(Tr G / d) = √⟨λ⟩
+    (the RMS latent std) d-INDEPENDENT — an equilibrium scaling law. This term pins σ to
+    its operating setpoint `sigma_target` (the ~0.8 std where the dual operators stay
+    coherent — the excitation anchor): penalty = (σ − sigma_target)². The band fixes the
+    spectral SHAPE (the fill ρ_eff); this fixes the SCALE (⟨λ⟩), composably. 0 wt ⇒ off.
+    eigvalsh-free (just the trace), so it is cheap and has a trivially stable backward."""
+    zc = z - z.mean(0, keepdim=True)
+    # σ = √(Tr G / d) = √⟨λ⟩ = sqrt(mean-over-dims of per-dim variance)  [scalar]
+    sigma = zc.pow(2).mean(0).mean().clamp_min(0.0).sqrt()
+    return (sigma - float(sigma_target)) ** 2
+
+
 def log_det_barrier(z: Tensor, eps: float = 1e-2) -> Tensor:
     """Log-determinant volume barrier on the representation's Gram (PM 2026-06-14 — the
     KL / Gaussian-prior spectrum term):  −mean ln(λ_i + eps).

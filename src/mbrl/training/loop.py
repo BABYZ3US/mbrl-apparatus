@@ -212,6 +212,9 @@ class Trainer:
             self.frame_band_floor_shape = str(_rf.get("band_floor_shape", "relu2"))  # cf18 floor wall
             self.frame_band_floor_beta = float(_rf.get("band_floor_beta", 20.0))
             self.frame_w_compress = float(_rf.get("w_compress", 0.0) or 0.0)  # cf15 nuclear-norm compression
+            self.frame_compress_eps = float(_rf.get("compress_eps", 1e-2))    # Tikhonov ridge in √(relu(λ−floor)+ε)
+            self.frame_w_sigma = float(_rf.get("w_sigma", 0.0) or 0.0)         # σ=√⟨λ⟩ setpoint weight (0 = off)
+            self.frame_sigma_target = float(_rf.get("sigma_target", 0.8))      # the σ operating point
             if self.frame_enabled and self.frame_energy_mode == "contractive" \
                     and self.dual.mode != "twin":
                 raise ValueError("rank2_frame.energy_mode=contractive needs "
@@ -813,6 +816,15 @@ class Trainer:
         out = {"latent/gram_cond": float(ev[-1] / ev[0].clamp_min(1e-12)),  # σmax/σmin
                "latent/gram_eff_rank": float(torch.exp(torch.as_tensor(spectral_entropy))),
                "latent/gram_spectral_entropy": spectral_entropy}
+        # σ-scaling / entropy-balance readouts (sigma_scaling_and_entropy_balance, 2026-06-15):
+        # σ=√⟨λ⟩ (the d-independent equilibrium std), the participation ratio ρ_eff=⟨λ⟩²/⟨λ²⟩,
+        # and the participation eff_rank = ρ_eff·d (companion to the entropy eff_rank above).
+        _mean_l = float(tot) / ev.shape[-1]
+        _mean_l2 = float((ev * ev).mean())
+        _rho_eff = (_mean_l * _mean_l) / max(_mean_l2, 1e-12)
+        out["latent/sigma_sqrt_meaneig"] = float(_mean_l ** 0.5)
+        out["latent/rho_eff"] = float(_rho_eff)
+        out["latent/eff_rank_participation"] = float(_rho_eff * ev.shape[-1])
         # full Gram spectrum (descending; latent/eig00 = largest) — the per-eigenvalue
         # series that turns the 3 summaries above into a time×eigenvalue heatmap / latent
         # PCA-over-training. eig already computed ⇒ ~free. Lets analyze_loss_dynamics.py
@@ -919,7 +931,8 @@ class Trainer:
         from ..regularization.rank2_frame import (axis_cos2, rank2_tail_penalty,
                                                    lyapunov_grounding, contractive_axis_in_d,
                                                    spectral_shell_penalty, log_det_barrier,
-                                                   spectral_band_penalty, spectral_compress_penalty)
+                                                   spectral_band_penalty, spectral_compress_penalty,
+                                                   sigma_balance_penalty)
         dl = self.dual
         metrics = {}
         term = z.new_zeros(())
@@ -970,9 +983,16 @@ class Trainer:
         # lower/decisively). Compresses only ABOVE the floor (inert below ⇒ no early-latent
         # shock, never fights the floor wall).
         if self.frame_w_compress > 0.0:
-            comp = spectral_compress_penalty(z, self.frame_band_floor)
+            comp = spectral_compress_penalty(z, self.frame_band_floor, self.frame_compress_eps)
             term = term + self.frame_w_compress * comp
             metrics["frame/compress"] = float(comp.detach())
+        # σ-scaling / entropy-balance setpoint: pin σ=√⟨λ⟩ (the band-pinned, d-independent
+        # equilibrium scale) to sigma_target (the ~0.8 coherent operating point). The band
+        # fixes the fill ρ_eff (shape); this fixes ⟨λ⟩ (scale).
+        if self.frame_w_sigma > 0.0:
+            sig = sigma_balance_penalty(z, self.frame_sigma_target)
+            term = term + self.frame_w_sigma * sig
+            metrics["frame/sigma_balance"] = float(sig.detach())
         # lyapunov grounding: the autonomous drift must descend E
         if (self.frame_energy_mode == "lyapunov" and self.energy is not None
                 and self.frame_w_lyap > 0.0):

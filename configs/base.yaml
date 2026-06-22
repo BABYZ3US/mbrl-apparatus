@@ -181,6 +181,14 @@ model:
                         # compressing the rest toward the floor. NO target rank — rank still
                         # emerges, just lower/more decisively. Complements the band floor
                         # (catches compressed modes at floor, not 0) and the return_gate. 0=off.
+      compress_eps: 1.0e-2  # Tikhonov RIDGE in the compress term √(relu(λ−floor)+ε) — bounds
+                        # the √ gradient at the floor (1/(2√ε)) so compression never shocks the
+                        # near-singular early latent (the ml_closedform ε; now a tunable lever).
+                        # 1e-2 = the legacy hardcoded value (byte-exact).
+      w_sigma: 0.0      # σ-SCALING / entropy-balance setpoint: weight on (σ−sigma_target)²,
+                        # σ=√⟨λ⟩ (the band-pinned, d-INDEPENDENT equilibrium std). The band fixes
+                        # the spectral SHAPE (fill ρ_eff); this fixes the SCALE (⟨λ⟩). 0 = off.
+      sigma_target: 0.8 # the σ operating setpoint — the coherent-operator std (excitation anchor).
       balance: false    # cf7 (PM 2026-06-14): equilibrium-couple the alignment (couple)
                         # and energy (dissipativity) penalties — normalize each by its
                         # running magnitude before summing so neither outweighs the other
