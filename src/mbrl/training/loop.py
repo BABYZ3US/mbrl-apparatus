@@ -243,8 +243,29 @@ class Trainer:
         # grid). Init 1.0 = conservative floor before any real data is seen.
         self.symlog_bound = 1.0  # checkpointed (bitwise resume)
         self.symexp_margin = float(cfg.imagination.get("symexp_margin", 1.5))
-        self.policy = Policy(rk, action_dim, h, d, task_dim=task_dim,
-                             init_scale=float(cfg.model.get("policy_init_scale", 1.0))).to(device)
+        # algo.actor selector: gaussian (default = the existing tanh-squashed Policy; byte-exact)
+        # | squashed_gaussian = the explicit SAC actor (models.critics.SquashedGaussianPolicy).
+        _algo = dict(cfg.get("algo", {}) or {})
+        if str(_algo.get("actor", "gaussian")) == "squashed_gaussian":
+            from ..models.critics import SquashedGaussianPolicy
+            self.policy = SquashedGaussianPolicy(rk, action_dim, h, d, task_dim=task_dim).to(device)
+        else:
+            self.policy = Policy(rk, action_dim, h, d, task_dim=task_dim,
+                                 init_scale=float(cfg.model.get("policy_init_scale", 1.0))).to(device)
+        # algo.planner=sdre: the operator-native SDRE controller acts at COLLECTION (Trainer.act)
+        # via the operator's local (A(z),B(z)); the model/value keep training. Requires operator
+        # dynamics. Analytic (no params) ⇒ nothing extra to optimize or checkpoint. Default Q=I
+        # is a stabilizing law (toward z_ref=0); a reward-aware cost is the follow-on.
+        self.use_sdre = (str(_algo.get("planner", "none")) == "sdre")
+        self.sdre = None
+        if self.use_sdre:
+            if not self.dyn_operator:
+                raise ValueError("algo.planner=sdre requires model.dynamics=operator (needs A,B)")
+            from ..planning.operator_sdre import OperatorSDRE
+            _sd = dict(_algo.get("sdre", {}) or {})
+            self.sdre = OperatorSDRE(horizon=int(_sd.get("horizon", 15)),
+                                     q_weight=float(_sd.get("q_weight", 1.0)),
+                                     r_weight=float(_sd.get("r_weight", 1.0)))
         self.value = ValueFn(rk, h, d, task_dim=task_dim).to(device)
         self.value_target = copy.deepcopy(self.value).requires_grad_(False)
         # A4 clipped double-value (PM 2026-06-15; TD3 twin-value min on the imagined λ-return
@@ -2327,6 +2348,10 @@ class Trainer:
         only by the det-eval metric; collection/gates keep the stochastic path."""
         if self.use_planner:
             return self.planner.act(z, tau)
+        if self.use_sdre:   # operator-native SDRE controller (LQR via the operator's A(z),B(z))
+            op = self.dual.op_d if self.dual_latent else self.dynamics
+            zin = self.dual.d_of(z) if self.dual_latent else z
+            return self.sdre.act(zin, op)
         # policy inertia: act/collect with the slow EMA policy when enabled
         actor = (self.policy_ema if (self.policy_ema is not None and self.policy_ema_act)
                  else self.policy)

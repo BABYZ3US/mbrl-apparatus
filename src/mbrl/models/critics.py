@@ -60,11 +60,13 @@ class SquashedGaussianPolicy(nn.Module):
         super().__init__()
         self.net = mlp([latent_dim + task_dim] + [hidden] * depth + [2 * action_dim])
         self.action_dim, self.action_scale, self.task_dim = action_dim, action_scale, task_dim
+        # settable lower clamp (reward_adapt.logstd_floor drives it, like models.policy.Policy)
+        self.log_std_min = float(self.LOG_STD_MIN)
 
     def forward(self, z: Tensor, tau: Tensor | None = None) -> tuple[Tensor, Tensor]:
         x = torch.cat([z, tau], dim=-1) if self.task_dim else z
         mu, log_std = self.net(x).chunk(2, dim=-1)
-        return mu, log_std.clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
+        return mu, log_std.clamp(self.log_std_min, self.LOG_STD_MAX)
 
     def sample(self, z: Tensor, tau: Tensor | None = None) -> tuple[Tensor, Tensor]:
         """Reparameterized action in (-scale, scale) + its exact log-prob."""
@@ -91,3 +93,7 @@ class SquashedGaussianPolicy(nn.Module):
         """The mode (tanh of the mean) — evaluation-time action."""
         mu, _ = self(z, tau)
         return torch.tanh(mu) * self.action_scale
+
+    def mean_action(self, z: Tensor, tau: Tensor | None = None) -> Tensor:
+        """Alias for API parity with models.policy.Policy (the Trainer's det-eval seam)."""
+        return self.deterministic(z, tau)
